@@ -39,7 +39,7 @@ plugins/
 | `/mpm add <index> [loop] [bar]` | Add song to playlist                |
 | `/mpm del <index>`              | Remove song from playlist           |
 | `/mpm pause`                    | Pause playback                      |
-| `/mpm continue`                 | Resume playback                     |
+| `/mpm resume`                   | Resume playback                     |
 | `/mpm stop`                     | Stop playback and clear playlist    |
 | `/mpm playlist`                 | Show current playlist               |
 

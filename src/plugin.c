@@ -178,7 +178,7 @@ static void print_usage(void *sender)
     sender_send_message(sender, MC_YELLOW "/mpm list [filter]");
     sender_send_message(sender, MC_YELLOW "/mpm add <index> [loop] [bar]");
     sender_send_message(sender, MC_YELLOW "/mpm del <index>");
-    sender_send_message(sender, MC_YELLOW "/mpm pause | continue | stop | playlist");
+    sender_send_message(sender, MC_YELLOW "/mpm pause | resume | stop | playlist");
     sender_send_message(sender, MC_YELLOW "/mpm help");
     sender_send_message(sender, MC_GOLD   "[MediaPlayer] " MC_GREEN "─── Bar types ───");
     sender_send_message(sender, MC_AQUA   "  0=off  1=popup  2=tip  3=bossbar (default)");
@@ -275,13 +275,13 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
         return;
     }
 
-    /* ── pause / continue / stop ── */
+    /* ── pause / resume / stop ── */
     if (strcmp(action, "pause") == 0) {
         player_music_pause(sender);
         sender_send_message(sender, MP_TAG "Paused");
         return;
     }
-    if (strcmp(action, "continue") == 0) {
+    if (strcmp(action, "resume") == 0) {
         player_music_resume(sender);
         sender_send_message(sender, MP_TAG "Resumed");
         return;
@@ -453,7 +453,7 @@ __declspec(dllexport) void *init_endstone_plugin(void)
             "/mpm add <index: int> [loop: int] [bar: int]",
             "/mpm del <index: int>",
             "/mpm pause",
-            "/mpm continue",
+            "/mpm resume",
             "/mpm stop",
             "/mpm playlist",
             "/mpm help",

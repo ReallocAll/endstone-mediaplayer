@@ -39,7 +39,7 @@ plugins/
 | `/mpm add <index> [loop] [bar]` | 添加歌曲到播放列表     |
 | `/mpm del <index>`              | 从播放列表删除         |
 | `/mpm pause`                    | 暂停播放               |
-| `/mpm continue`                 | 继续播放               |
+| `/mpm resume`                   | 继续播放               |
 | `/mpm stop`                     | 停止播放并清空列表     |
 | `/mpm playlist`                 | 查看当前播放列表       |
 
