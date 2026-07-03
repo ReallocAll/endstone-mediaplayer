@@ -293,7 +293,18 @@ void player_music_stop(void *player)
 void player_music_pause(void *player)
 {
     long long pos = player_music_find(player);
-    if (pos >= 0) g_music_ctx.online_players[pos].paused = true;
+    if (pos < 0) return;
+    struct player_music *pm = &g_music_ctx.online_players[pos];
+    pm->paused = true;
+
+    if (arrlen(pm->playlist) == 0) return;
+    struct music_queue_entry *entry = &pm->playlist[pm->current_track];
+
+    if (entry->bar_type == MUSIC_BAR_BOSSBAR && entry->boss_bar) {
+        boss_bar_set_title(entry->boss_bar, MC_GRAY "Paused");
+    } else if (entry->bar_type == MUSIC_BAR_POPUP || entry->bar_type == MUSIC_BAR_TIP) {
+        player_send_popup(pm->player, MC_GRAY "Paused");
+    }
 }
 
 void player_music_resume(void *player)
