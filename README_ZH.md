@@ -1,6 +1,6 @@
 # MediaPlayer for Endstone
 
-[![CI](https://github.com/ReallocAll/endstone_mediaplayer/actions/workflows/build.yml/badge.svg)](https://github.com/ReallocAll/endstone_mediaplayer/actions/workflows/build.yml)
+[![CI](https://github.com/ReallocAll/endstone-mediaplayer/actions/workflows/build.yml/badge.svg)](https://github.com/ReallocAll/endstone-mediaplayer/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [English](README.md) | [简体中文](README_ZH.md)
 
