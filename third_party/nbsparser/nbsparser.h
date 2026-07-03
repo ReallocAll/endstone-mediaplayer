@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 struct nbs_note {
-    unsigned short tick;
+    unsigned int   tick;
     unsigned short layer;
     unsigned char instrument;
     unsigned char key;
