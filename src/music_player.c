@@ -126,6 +126,8 @@ long long song_cache_parse(FILE *fp, const char *song_name)
     struct nbs_song *nbs = nbs_parse(fp);
     if (!nbs) return -1;
 
+    if (nbs->tempo <= 0.0f) { nbs_free(nbs); return -1; }
+
     struct song_cache_entry entry;
     memset(&entry, 0, sizeof(entry));
     strncpy(entry.song_name, song_name, sizeof(entry.song_name) - 1);
