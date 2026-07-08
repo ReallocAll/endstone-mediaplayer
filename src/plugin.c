@@ -174,16 +174,14 @@ static const char *loop_desc(int loop)
 
 static void print_usage(void *sender)
 {
-    sender_send_message(sender, MC_GOLD   "[MediaPlayer] " MC_GREEN "─── Commands ───");
-    sender_send_message(sender, MC_YELLOW "/mpm list [filter]");
-    sender_send_message(sender, MC_YELLOW "/mpm add <index> [loop] [bar]");
-    sender_send_message(sender, MC_YELLOW "/mpm del <index>");
-    sender_send_message(sender, MC_YELLOW "/mpm pause | resume | stop | playlist");
-    sender_send_message(sender, MC_YELLOW "/mpm help");
-    sender_send_message(sender, MC_GOLD   "[MediaPlayer] " MC_GREEN "─── Bar types ───");
-    sender_send_message(sender, MC_AQUA   "  0=off  1=popup  2=tip  3=bossbar (default)");
-    sender_send_message(sender, MC_GOLD   "[MediaPlayer] " MC_GREEN "─── Loop ───");
-    sender_send_message(sender, MC_AQUA   "  -1=infinite  1=once  N=N times");
+    sender_send_message(sender, MC_GRAY "───── " MC_GREEN "MediaPlayer" MC_GRAY " ─────");
+    sender_send_message(sender, MC_GRAY " /mpm " MC_YELLOW "list " MC_GRAY "[filter]");
+    sender_send_message(sender, MC_GRAY " /mpm " MC_YELLOW "add " MC_GRAY "<index> [loop] [bar]");
+    sender_send_message(sender, MC_GRAY " /mpm " MC_YELLOW "del " MC_GRAY "<index>");
+    sender_send_message(sender, MC_GRAY " /mpm " MC_YELLOW "pause" MC_GRAY " | " MC_YELLOW "resume" MC_GRAY " | " MC_YELLOW "stop");
+    sender_send_message(sender, MC_GRAY " /mpm " MC_YELLOW "playlist");
+    sender_send_message(sender, MC_GRAY "── " MC_AQUA "Bar" MC_GRAY " ──  " MC_GRAY "0=off  1=popup  2=tip  3=bossbar");
+    sender_send_message(sender, MC_GRAY "── " MC_AQUA "Loop" MC_GRAY " ──  " MC_GRAY "-1=infinite  1=once  N=times");
 }
 
 static void handle_mpm(void *sender, int argc, const char *argv[])
@@ -199,13 +197,28 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
         char **files = nullptr;
         int count = list_nbs_files(path_nbs(), &files);
         if (count == 0) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] No .nbs files found!");
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No .nbs files in data folder");
             return;
         }
-        sender_send_message(sender, MP_TAG MC_GREEN "[Index] " MC_AQUA "Music List");
+        const char *filter = (argc >= 2) ? argv[1] : nullptr;
+        int matched = 0;
         for (int i = 0; i < count; i++) {
-            if (argc >= 2 && !strstr(files[i], argv[1])) continue;
-            snprintf(msg, sizeof(msg), MP_TAG MC_GREEN "[%d] " MC_AQUA "%s", i, files[i]);
+            if (filter && !strstr(files[i], filter)) continue;
+            snprintf(msg, sizeof(msg),
+                     MC_GREEN "[MediaPlayer] " MC_GRAY "[%d] " MC_YELLOW "%s",
+                     i, files[i]);
+            sender_send_message(sender, msg);
+            matched++;
+        }
+        if (matched == 0) {
+            snprintf(msg, sizeof(msg),
+                     MC_RED "[MediaPlayer] " MC_GRAY "No matches for " MC_YELLOW "'%s'",
+                     filter);
+            sender_send_message(sender, msg);
+        } else if (filter) {
+            snprintf(msg, sizeof(msg),
+                     MC_GREEN "[MediaPlayer] " MC_GRAY "%d of %d matched",
+                     matched, count);
             sender_send_message(sender, msg);
         }
         free_nbs_list(files, count);
@@ -214,7 +227,7 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
 
     /* ── player-only commands ── */
     if (!VCALL0(sender, ES_SENDER_SLOT_AS_PLAYER, void *)) {
-        sender_send_message(sender, MC_RED "[MediaPlayer] This command requires a player");
+        sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Player-only command");
         return;
     }
 
@@ -225,37 +238,53 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
         int bar  = (argc >= 4) ? atoi(argv[3]) : MUSIC_BAR_BOSSBAR;
 
         if (idx < 0) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] Index must be >= 0");
-            return;
-        }
-        if (loop < -1) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] Loop must be >= -1 (-1=infinite, 1=once)");
-            return;
-        }
-        if (bar < 0 || bar > 3) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] Bar must be 0-3 (0=off, 1=popup, 2=tip, 3=bossbar)");
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Index must be >= 0");
             return;
         }
 
         char **files = nullptr;
         int count = list_nbs_files(path_nbs(), &files);
         if (count == 0) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] No .nbs files!");
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No .nbs files in data folder");
             return;
         }
         if (idx >= count) {
-            snprintf(msg, sizeof(msg), MC_RED "[MediaPlayer] Index out of range (max %d)", count - 1);
+            snprintf(msg, sizeof(msg),
+                     MC_RED "[MediaPlayer] " MC_GRAY "Index out of range " MC_YELLOW "(max %d)",
+                     count - 1);
             sender_send_message(sender, msg);
             free_nbs_list(files, count);
             return;
         }
-        if (player_music_enqueue(sender, files[idx], loop, (enum music_bar_type)bar)) {
-            snprintf(msg, sizeof(msg), MP_TAG MC_AQUA "Added " MC_GREEN "%s" MC_AQUA
-                     "  [" MC_GREEN "%s" MC_AQUA "]  [" MC_GREEN "%s" MC_AQUA "]",
+
+        enum enqueue_result r = player_music_enqueue(sender, files[idx], loop,
+                                                      (enum music_bar_type)bar);
+        switch (r) {
+        case ENQUEUE_OK:
+            snprintf(msg, sizeof(msg),
+                     MC_GREEN "[MediaPlayer] " MC_GRAY "Added " MC_YELLOW "%s"
+                     MC_GRAY "  [" MC_AQUA "%s" MC_GRAY "]  [" MC_AQUA "%s" MC_GRAY "]",
                      files[idx], bar_type_name(bar), loop_desc(loop));
             sender_send_message(sender, msg);
-        } else {
-            sender_send_message(sender, MC_RED "[MediaPlayer] Failed to add music");
+            break;
+        case ENQUEUE_BAD_LOOP:
+            sender_send_message(sender,
+                                MC_RED "[MediaPlayer] " MC_GRAY "Loop must be >= -1  "
+                                MC_GRAY "(-1=infinite, 1=once, N=times)");
+            break;
+        case ENQUEUE_BAD_BAR:
+            sender_send_message(sender,
+                                MC_RED "[MediaPlayer] " MC_GRAY "Bar must be 0-3  "
+                                MC_GRAY "(0=off, 1=popup, 2=tip, 3=bossbar)");
+            break;
+        case ENQUEUE_FILE_ERROR:
+            snprintf(msg, sizeof(msg),
+                     MC_RED "[MediaPlayer] " MC_GRAY "Failed to load " MC_YELLOW "%s",
+                     files[idx]);
+            sender_send_message(sender, msg);
+            break;
+        default:
+            break;
         }
         free_nbs_list(files, count);
         return;
@@ -265,30 +294,95 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
     if (strcmp(action, "del") == 0 && argc >= 2) {
         int idx = atoi(argv[1]);
         if (idx < 0) {
-            sender_send_message(sender, MC_RED "[MediaPlayer] Index must be >= 0");
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Index must be >= 0");
             return;
         }
-        if (player_music_dequeue(sender, (size_t)idx))
-            sender_send_message(sender, MP_TAG "Deleted");
-        else
-            sender_send_message(sender, MC_RED "[MediaPlayer] Delete failed");
+
+        long long pos = player_music_find(sender);
+        if (pos < 0) {
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Playlist is empty");
+            return;
+        }
+        struct player_music *pm = &g_music_ctx.online_players[pos];
+        if ((size_t)idx >= arrlen(pm->playlist)) {
+            snprintf(msg, sizeof(msg),
+                     MC_RED "[MediaPlayer] " MC_GRAY "Index out of range " MC_YELLOW "(max %d)",
+                     (int)arrlen(pm->playlist) - 1);
+            sender_send_message(sender, msg);
+            return;
+        }
+        const char *name = g_music_ctx.song_cache[pm->playlist[idx].song_index].song_name;
+        char name_buf[256];
+        strncpy(name_buf, name, sizeof(name_buf) - 1);
+        name_buf[sizeof(name_buf) - 1] = '\0';
+
+        enum player_op_result r = player_music_dequeue(sender, (size_t)idx);
+        switch (r) {
+        case PLAYER_OK:
+            snprintf(msg, sizeof(msg),
+                     MC_GREEN "[MediaPlayer] " MC_GRAY "Removed " MC_YELLOW "%s", name_buf);
+            sender_send_message(sender, msg);
+            break;
+        case PLAYER_NO_PLAYLIST:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Playlist is empty");
+            break;
+        case PLAYER_INDEX_OUT_OF_RANGE:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Index out of range");
+            break;
+        default:
+            break;
+        }
         return;
     }
 
-    /* ── pause / resume / stop ── */
+    /* ── pause ── */
     if (strcmp(action, "pause") == 0) {
-        player_music_pause(sender);
-        sender_send_message(sender, MP_TAG "Paused");
+        switch (player_music_pause(sender)) {
+        case PLAYER_OK:
+            sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Paused");
+            break;
+        case PLAYER_NO_PLAYLIST:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No music playing");
+            break;
+        case PLAYER_ALREADY_PAUSED:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Already paused");
+            break;
+        default:
+            break;
+        }
         return;
     }
+
+    /* ── resume ── */
     if (strcmp(action, "resume") == 0) {
-        player_music_resume(sender);
-        sender_send_message(sender, MP_TAG "Resumed");
+        switch (player_music_resume(sender)) {
+        case PLAYER_OK:
+            sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Resumed");
+            break;
+        case PLAYER_NO_PLAYLIST:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No music playing");
+            break;
+        case PLAYER_NOT_PAUSED:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Not paused");
+            break;
+        default:
+            break;
+        }
         return;
     }
+
+    /* ── stop ── */
     if (strcmp(action, "stop") == 0) {
-        player_music_stop(sender);
-        sender_send_message(sender, MP_TAG "Stopped");
+        switch (player_music_stop(sender)) {
+        case PLAYER_OK:
+            sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Stopped");
+            break;
+        case PLAYER_NO_PLAYLIST:
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No music playing");
+            break;
+        default:
+            break;
+        }
         return;
     }
 
@@ -296,22 +390,28 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
     if (strcmp(action, "playlist") == 0) {
         long long pos = player_music_find(sender);
         if (pos < 0) {
-            sender_send_message(sender, MP_TAG "Playlist empty!");
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Playlist is empty");
             return;
         }
         struct player_music *pm = &g_music_ctx.online_players[pos];
         int len = (int)arrlen(pm->playlist);
-        sender_send_message(sender, MP_TAG "─── Playlist ───");
+        snprintf(msg, sizeof(msg),
+                 MC_GREEN "[MediaPlayer] " MC_GRAY "Playlist (%d tracks)", len);
+        sender_send_message(sender, msg);
         for (int i = 0; i < len; i++) {
-            const char *marker = (i == (int)pm->current_track) ? " " MC_GREEN "(Current)" : "";
             const char *name = g_music_ctx.song_cache[pm->playlist[i].song_index].song_name;
-            snprintf(msg, sizeof(msg), MP_TAG MC_GREEN "[%d] " MC_AQUA "%s%s", i, name, marker);
+            if (i == (int)pm->current_track)
+                snprintf(msg, sizeof(msg),
+                         MC_GREEN "[MediaPlayer] " MC_YELLOW "> [%d] %s", i, name);
+            else
+                snprintf(msg, sizeof(msg),
+                         MC_GREEN "[MediaPlayer] " MC_GRAY "  [%d] %s", i, name);
             sender_send_message(sender, msg);
         }
         return;
     }
 
-    sender_send_message(sender, MC_RED "[MediaPlayer] Unknown subcommand. Use /mpm help");
+    sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Unknown subcommand, use /mpm help");
 }
 
 /* =====================================================================

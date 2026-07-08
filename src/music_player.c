@@ -228,8 +228,12 @@ static void do_path_stem(const char *filename, char *dst, size_t dst_size)
 }
 
 // --- Playlist operations ---
-bool player_music_enqueue(void *player, const char *nbs_file, int loop, enum music_bar_type bar)
+enum enqueue_result player_music_enqueue(void *player, const char *nbs_file,
+                                         int loop, enum music_bar_type bar)
 {
+    if (loop < -1) return ENQUEUE_BAD_LOOP;
+    if (bar < 0 || bar > MUSIC_BAR_BOSSBAR) return ENQUEUE_BAD_BAR;
+
     char stem[256];
     do_path_stem(nbs_file, stem, sizeof(stem));
 
@@ -238,10 +242,10 @@ bool player_music_enqueue(void *player, const char *nbs_file, int loop, enum mus
         char path[MAX_PATH_LEN];
         snprintf(path, MAX_PATH_LEN, "%s/%s", path_nbs(), nbs_file);
         FILE *fp = fopen_utf8(path, "rb");
-        if (!fp) return false;
+        if (!fp) return ENQUEUE_FILE_ERROR;
         cache_idx = song_cache_parse(fp, stem);
         fclose(fp);
-        if (cache_idx == -1) return false;
+        if (cache_idx == -1) return ENQUEUE_FILE_ERROR;
     }
 
     struct music_queue_entry entry;
@@ -266,16 +270,16 @@ bool player_music_enqueue(void *player, const char *nbs_file, int loop, enum mus
     } else {
         arrput(g_music_ctx.online_players[pos].playlist, entry);
     }
-    return true;
+    return ENQUEUE_OK;
 }
 
-bool player_music_dequeue(void *player, size_t index)
+enum player_op_result player_music_dequeue(void *player, size_t index)
 {
     long long pos = player_music_find(player);
-    if (pos < 0) return false;
+    if (pos < 0) return PLAYER_NO_PLAYLIST;
 
     struct player_music *pm = &g_music_ctx.online_players[pos];
-    if (index >= arrlen(pm->playlist)) return false;
+    if (index >= arrlen(pm->playlist)) return PLAYER_INDEX_OUT_OF_RANGE;
 
     // Clean up boss bar for the entry being removed
     if (pm->playlist[index].boss_bar) {
@@ -299,29 +303,29 @@ bool player_music_dequeue(void *player, size_t index)
         arrdel(pm->playlist, (int)index);
         if (index < pm->current_track) pm->current_track--;
     }
-    return true;
+    return PLAYER_OK;
 }
 
-void player_music_stop(void *player)
+enum player_op_result player_music_stop(void *player)
 {
     long long pos = player_music_find(player);
-    if (pos < 0) return;
+    if (pos < 0) return PLAYER_NO_PLAYLIST;
     cleanup_playlist_bossbars(&g_music_ctx.online_players[pos]);
     arrfree(g_music_ctx.online_players[pos].playlist);
     arrdelswap(g_music_ctx.online_players, (int)pos);
+    return PLAYER_OK;
 }
 
-void player_music_pause(void *player)
+enum player_op_result player_music_pause(void *player)
 {
     long long pos = player_music_find(player);
-    if (pos < 0) return;
+    if (pos < 0) return PLAYER_NO_PLAYLIST;
     struct player_music *pm = &g_music_ctx.online_players[pos];
+    if (arrlen(pm->playlist) == 0) return PLAYER_NO_PLAYLIST;
+    if (pm->paused) return PLAYER_ALREADY_PAUSED;
     pm->paused = true;
 
-    if (arrlen(pm->playlist) == 0) return;
     struct music_queue_entry *entry = &pm->playlist[pm->current_track];
-
-    // Save elapsed so resume can restore correct playback position
     int64_t now_ms = get_tick_ms() - g_tick_start_ms;
     entry->pause_elapsed = now_ms - entry->start_ms;
 
@@ -330,20 +334,22 @@ void player_music_pause(void *player)
     } else if (entry->bar_type == MUSIC_BAR_POPUP || entry->bar_type == MUSIC_BAR_TIP) {
         player_send_popup(pm->player, MC_GRAY "Paused");
     }
+    return PLAYER_OK;
 }
 
-void player_music_resume(void *player)
+enum player_op_result player_music_resume(void *player)
 {
     long long pos = player_music_find(player);
-    if (pos < 0) return;
+    if (pos < 0) return PLAYER_NO_PLAYLIST;
     struct player_music *pm = &g_music_ctx.online_players[pos];
+    if (arrlen(pm->playlist) == 0) return PLAYER_NO_PLAYLIST;
+    if (!pm->paused) return PLAYER_NOT_PAUSED;
     pm->paused = false;
-    if (arrlen(pm->playlist) > 0) {
-        struct music_queue_entry *entry = &pm->playlist[pm->current_track];
-        int64_t now_ms = get_tick_ms() - g_tick_start_ms;
-        entry->start_ms = now_ms - entry->pause_elapsed;
-        entry->pause_elapsed = 0;
-    }
+    struct music_queue_entry *entry = &pm->playlist[pm->current_track];
+    int64_t now_ms = get_tick_ms() - g_tick_start_ms;
+    entry->start_ms = now_ms - entry->pause_elapsed;
+    entry->pause_elapsed = 0;
+    return PLAYER_OK;
 }
 
 void music_player_query_playlist(void *player) { (void)player; }

@@ -98,9 +98,6 @@ static inline void str_reset_ssio(void *s) {
 #define MC_YELLOW  "\xc2\xa7" "e"
 #define MC_GRAY    "\xc2\xa7" "7"
 
-/* Prefix for all MediaPlayer messages */
-#define MP_TAG     MC_GREEN "[MediaPlayer] "
-
 /* ── std::vector construction helpers ─────────────────────────────── */
 
 /* Initialize a std::vector<T> to contain `count` elements of `elem_size`

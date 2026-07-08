@@ -21,6 +21,23 @@ enum music_bar_type {
     MUSIC_BAR_BOSSBAR,
 };
 
+enum enqueue_result {
+    ENQUEUE_OK = 0,
+    ENQUEUE_NO_FILES,
+    ENQUEUE_INDEX_OUT_OF_RANGE,
+    ENQUEUE_BAD_LOOP,
+    ENQUEUE_BAD_BAR,
+    ENQUEUE_FILE_ERROR,
+};
+
+enum player_op_result {
+    PLAYER_OK = 0,
+    PLAYER_NO_PLAYLIST,
+    PLAYER_INDEX_OUT_OF_RANGE,
+    PLAYER_ALREADY_PAUSED,
+    PLAYER_NOT_PAUSED,
+};
+
 struct note {
     int64_t time_ms;
     int     instrument;
@@ -67,11 +84,11 @@ long long song_cache_parse(FILE *fp, const char *song_name);
 
 // Player management
 long long player_music_find(void *player);
-bool player_music_enqueue(void *player, const char *nbs_file, int loop, enum music_bar_type bar);
-bool player_music_dequeue(void *player, size_t index);
-void player_music_stop(void *player);
-void player_music_pause(void *player);
-void player_music_resume(void *player);
+enum enqueue_result player_music_enqueue(void *player, const char *nbs_file, int loop, enum music_bar_type bar);
+enum player_op_result player_music_dequeue(void *player, size_t index);
+enum player_op_result player_music_stop(void *player);
+enum player_op_result player_music_pause(void *player);
+enum player_op_result player_music_resume(void *player);
 void music_player_query_playlist(void *player);
 
 // Called from event handlers
