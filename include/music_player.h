@@ -112,6 +112,7 @@ FILE *fopen_utf8(const char *path, const char *mode);
 void sender_send_message(void *sender, const char *msg);
 void player_play_sound(void *player, const char *sound, float volume, float pitch);
 void player_send_popup(void *player, const char *msg);
+void player_send_tip(void *player, const char *msg);
 void *boss_bar_create(void *player, const char *title);
 void boss_bar_destroy(void *bb);
 void boss_bar_set_progress(void *bb, float progress);

@@ -331,8 +331,10 @@ enum player_op_result player_music_pause(void *player)
 
     if (entry->bar_type == MUSIC_BAR_BOSSBAR && entry->boss_bar) {
         boss_bar_set_title(entry->boss_bar, MC_GRAY "Paused");
-    } else if (entry->bar_type == MUSIC_BAR_POPUP || entry->bar_type == MUSIC_BAR_TIP) {
+    } else if (entry->bar_type == MUSIC_BAR_POPUP) {
         player_send_popup(pm->player, MC_GRAY "Paused");
+    } else if (entry->bar_type == MUSIC_BAR_TIP) {
+        player_send_tip(pm->player, MC_GRAY "Paused");
     }
     return PLAYER_OK;
 }
@@ -412,7 +414,7 @@ void music_player_tick(void)
                              song->song_name, pmin, psec, tmin, tsec);
                     boss_bar_set_title(entry->boss_bar, title_buf);
                 }
-            } else {
+            } else if (entry->bar_type == MUSIC_BAR_POPUP) {
                 int tmin = (int)(total / 60000), tsec = (int)((total / 1000) % 60);
                 int pmin = (int)(elapsed / 60000), psec = (int)((elapsed / 1000) % 60);
                 char bar[80];
@@ -420,6 +422,14 @@ void music_player_tick(void)
                          MC_AQUA "%d:%02d" MC_GRAY "/" MC_AQUA "%d:%02d",
                          pmin, psec, tmin, tsec);
                 player_send_popup(pm->player, bar);
+            } else if (entry->bar_type == MUSIC_BAR_TIP) {
+                int tmin = (int)(total / 60000), tsec = (int)((total / 1000) % 60);
+                int pmin = (int)(elapsed / 60000), psec = (int)((elapsed / 1000) % 60);
+                char bar[80];
+                snprintf(bar, sizeof(bar),
+                         MC_AQUA "%d:%02d" MC_GRAY "/" MC_AQUA "%d:%02d",
+                         pmin, psec, tmin, tsec);
+                player_send_tip(pm->player, bar);
             }
         }
 

@@ -1,7 +1,7 @@
 /**
  * endstone_api.c — Endstone API wrappers for pure C.
  *
- * Player methods (playSound, sendPopup, getLocation), BossBar helpers,
+ * Player methods (playSound, sendPopup, sendTip, getLocation), BossBar helpers,
  * sendMessage, and UTF-8 file open.  All vtable dispatch goes through
  * the VCALL/STR_GUARD macros from abi_helpers.h.
  */
@@ -85,6 +85,15 @@ void player_send_popup(void *player, const char *msg)
     char str[ES_STRING_SIZE];
     cpp_string_construct(str, msg);
     STR_GUARD(str, VCALL1(player, ES_PLAYER_SLOT_SEND_POPUP, void, void *, str));
+}
+
+/* sendTip takes std::string BY VALUE. */
+void player_send_tip(void *player, const char *msg)
+{
+    if (!player) return;
+    char str[ES_STRING_SIZE];
+    cpp_string_construct(str, msg);
+    STR_GUARD(str, VCALL1(player, ES_PLAYER_SLOT_SEND_TIP, void, void *, str));
 }
 
 /* =====================================================================

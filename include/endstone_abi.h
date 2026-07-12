@@ -129,9 +129,9 @@
 #define ES_PLAYER_SLOT_PLAY_SOUND     65   /* (Location, string, float, float) — IDA: vtable+520 */
 #define ES_PLAYER_SLOT_STOP_SOUND     66   /* (string) */
 #define ES_PLAYER_SLOT_STOP_ALL       67   /* () */
-#define ES_PLAYER_SLOT_SEND_POPUP     86   /* (string) */
-#define ES_PLAYER_SLOT_SEND_TIP       87   /* (string) */
-#define ES_PLAYER_SLOT_SEND_TOAST     88   /* (string, string) */
+#define ES_PLAYER_SLOT_SEND_POPUP     85   /* (string) */
+#define ES_PLAYER_SLOT_SEND_TIP       86   /* (string) */
+#define ES_PLAYER_SLOT_SEND_TOAST     87   /* (string, string) */
 #define ES_PLAYER_SLOT_SEND_PACKET   109   /* (int, string_view) */
 
 /* --- Scheduler vtable --- */
