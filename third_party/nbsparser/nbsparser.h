@@ -2,15 +2,92 @@
 #define NBS_PARSER_H
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
+
+/* Resource limits — chosen to allow large songs while preventing DoS.
+ * Memory estimate per nbs_song at max limits:
+ *   notes:      1M × 24 bytes = 24 MiB
+ *   layers:     1024 × 40 bytes ≈ 41 KiB
+ *   instruments: 255 × 24 bytes ≈ 6 KiB
+ *   strings:    limited individually; total bounded by file size
+ * Total well within typical server memory budgets.
+ */
+#define NBS_MAX_STRING_LEN   (1048576U)  /* 1 MiB per string — NBS spec has no string limit */
+#define NBS_MAX_NOTES        (1000000U)  /* 1M notes — supports ~3 hour songs at 20 TPS */
+#define NBS_MAX_LAYERS       (1024U)     /* 1024 layers — far beyond practical use */
+#define NBS_MAX_INSTRUMENTS  (255U)      /* Format limit: uint8_t count field */
+
+/* NBS format version support */
+#define NBS_VERSION_MIN  (0U)
+#define NBS_VERSION_MAX  (5U)
+
+/* Error codes describing failure category */
+enum nbs_error_code {
+    NBS_ERROR_NONE = 0,
+    NBS_ERROR_INVALID_ARGUMENT,
+    NBS_ERROR_TRUNCATED,
+    NBS_ERROR_UNSUPPORTED_VERSION,
+    NBS_ERROR_INVALID_VALUE,
+    NBS_ERROR_LIMIT_EXCEEDED,
+    NBS_ERROR_INTEGER_OVERFLOW,
+    NBS_ERROR_OUT_OF_MEMORY,
+    NBS_ERROR_IO,
+};
+
+/* Parser section being processed when error occurred */
+enum nbs_section {
+    NBS_SECTION_NONE = 0,
+    NBS_SECTION_HEADER,
+    NBS_SECTION_NOTES,
+    NBS_SECTION_LAYERS,
+    NBS_SECTION_INSTRUMENTS,
+};
+
+/* Detailed error information returned by nbs_parse */
+struct nbs_error_info {
+    enum nbs_error_code code;
+    enum nbs_section    section;
+    int64_t             file_offset;  /* ftell position when error occurred */
+    uint32_t            tick;         /* current tick (notes section) */
+    uint32_t            layer;        /* current layer (notes section) */
+};
+
+static inline const char *nbs_error_string(enum nbs_error_code code)
+{
+    switch (code) {
+    case NBS_ERROR_NONE:             return "success";
+    case NBS_ERROR_INVALID_ARGUMENT: return "invalid argument";
+    case NBS_ERROR_TRUNCATED:        return "truncated file";
+    case NBS_ERROR_UNSUPPORTED_VERSION: return "unsupported NBS version";
+    case NBS_ERROR_INVALID_VALUE:    return "invalid value";
+    case NBS_ERROR_LIMIT_EXCEEDED:   return "resource limit exceeded";
+    case NBS_ERROR_INTEGER_OVERFLOW: return "integer overflow";
+    case NBS_ERROR_OUT_OF_MEMORY:    return "out of memory";
+    case NBS_ERROR_IO:               return "I/O error";
+    default:                         return "unknown error";
+    }
+}
+
+static inline const char *nbs_section_string(enum nbs_section section)
+{
+    switch (section) {
+    case NBS_SECTION_NONE:         return "none";
+    case NBS_SECTION_HEADER:       return "header";
+    case NBS_SECTION_NOTES:        return "notes";
+    case NBS_SECTION_LAYERS:       return "layers";
+    case NBS_SECTION_INSTRUMENTS:  return "instruments";
+    default:                       return "unknown";
+    }
+}
 
 struct nbs_note {
     unsigned int   tick;
     unsigned short layer;
-    unsigned char instrument;
-    unsigned char key;
-    unsigned char velocity;
-    unsigned char panning;
-    short          pitch;
+    unsigned char  instrument;
+    unsigned char  key;
+    unsigned char  velocity;
+    int8_t         panning;     /* -100 to +100 (NBS 0–200 mapped to -100–100) */
+    short          pitch;       /* fine pitch in cents */
 };
 
 struct nbs_layer {
@@ -30,8 +107,8 @@ struct nbs_instrument {
 };
 
 struct nbs_song {
-    unsigned char version;
-    unsigned char default_instruments;
+    unsigned char  version;
+    unsigned char  default_instruments;
     unsigned short song_length;
     unsigned short song_layers;
     char          *song_name;
@@ -61,7 +138,7 @@ struct nbs_song {
 extern "C" {
 #endif
 
-struct nbs_song *nbs_parse(FILE *fp);
+struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error);
 void nbs_free(struct nbs_song *song);
 
 #ifdef __cplusplus
