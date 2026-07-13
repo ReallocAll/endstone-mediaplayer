@@ -76,3 +76,18 @@ if(PLUGINS_DIR)
         RUNTIME DESTINATION "${PLUGINS_DIR}"
         LIBRARY DESTINATION "${PLUGINS_DIR}")
 endif()
+
+# Unit tests
+enable_testing()
+add_executable(test_nbs_parser tests/test_nbs_parser.c
+    third_party/nbsparser/nbsparser.c
+    third_party/stb/stb_ds_impl.c)
+target_include_directories(test_nbs_parser PRIVATE
+    third_party/nbsparser
+    third_party/stb)
+target_compile_definitions(test_nbs_parser PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+set_target_properties(test_nbs_parser PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+add_test(NAME nbs_parser COMMAND test_nbs_parser)
