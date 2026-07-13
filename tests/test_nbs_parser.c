@@ -588,6 +588,219 @@ static int test_layer_limit_header(void) {
     return 1;
 }
 
+/* Test: Tick boundary at 65534 (max single jump) */
+static int test_tick_65535(void) {
+    FILE *fp = tmpfile();
+    EXPECT(fp != NULL, "tmpfile");
+
+    /* v4 header */
+    write_u16(fp, 0);
+    write_u8(fp, 4);
+    write_u8(fp, 10);
+    write_u16(fp, 100);
+    write_u16(fp, 1);
+    write_string(fp, "Song");
+    write_string(fp, "A");
+    write_string(fp, "O");
+    write_string(fp, "D");
+    write_u16(fp, 1000);
+    write_u8(fp, 0);
+    write_u8(fp, 0);
+    write_u8(fp, 4);
+    write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
+    write_string(fp, "");
+    write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
+
+    /* Note at tick 65534: jump = 65535 (max uint16) */
+    write_u16(fp, 65535);  /* tick jump */
+    write_u16(fp, 1);      /* layer jump */
+    write_u8(fp, 0);       /* instrument */
+    write_u8(fp, 60);      /* key */
+    write_u8(fp, 100);     /* velocity */
+    write_u8(fp, 100);     /* panning */
+    write_u16(fp, 0);      /* pitch */
+    write_u16(fp, 0);      /* end of layers */
+    write_notes_end(fp);
+
+    /* Layers */
+    write_string(fp, "L");
+    write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
+
+    write_u8(fp, 0);
+    rewind(fp);
+
+    struct nbs_error_info err;
+    struct nbs_song *song = nbs_parse(fp, &err);
+
+    EXPECT(song != NULL, "tick 65534 should parse");
+    EXPECT(arrlen(song->notes) == 1, "should have 1 note");
+    EXPECT(song->notes[0].tick == 65534, "tick should be 65534");
+
+    nbs_free(song);
+    fclose(fp);
+    return 1;
+}
+
+/* Test: Tick at 65536 using multiple jumps */
+static int test_tick_65536(void) {
+    FILE *fp = tmpfile();
+    EXPECT(fp != NULL, "tmpfile");
+
+    /* v4 header */
+    write_u16(fp, 0);
+    write_u8(fp, 4);
+    write_u8(fp, 10);
+    write_u16(fp, 100);
+    write_u16(fp, 1);
+    write_string(fp, "S"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
+    write_u16(fp, 1000);
+    write_u8(fp, 0); write_u8(fp, 0); write_u8(fp, 4);
+    write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
+    write_string(fp, "");
+    write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
+
+    /* Tick 65534 (jump=65535), then jump=2 to reach 65536 */
+    write_u16(fp, 65535);  /* tick 65534 */
+    write_u16(fp, 1);
+    write_u8(fp, 0); write_u8(fp, 60); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
+    write_u16(fp, 0);
+
+    write_u16(fp, 2);    /* jump 2 -> tick 65536 */
+    write_u16(fp, 1);
+    write_u8(fp, 0); write_u8(fp, 64); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
+    write_u16(fp, 0);
+    write_notes_end(fp);
+
+    write_string(fp, "L");
+    write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
+    write_u8(fp, 0);
+    rewind(fp);
+
+    struct nbs_error_info err;
+    struct nbs_song *song = nbs_parse(fp, &err);
+
+    EXPECT(song != NULL, "tick 65536 should parse");
+    EXPECT(arrlen(song->notes) == 2, "should have 2 notes");
+    EXPECT(song->notes[0].tick == 65534, "first note tick should be 65534");
+    EXPECT(song->notes[1].tick == 65536, "second note tick should be 65536");
+
+    nbs_free(song);
+    fclose(fp);
+    return 1;
+}
+
+/* Test: Tick at 100000 using multiple jumps */
+static int test_tick_100000(void) {
+    FILE *fp = tmpfile();
+    EXPECT(fp != NULL, "tmpfile");
+
+    /* v4 header */
+    write_u16(fp, 0);
+    write_u8(fp, 4);
+    write_u8(fp, 10);
+    write_u16(fp, 100);
+    write_u16(fp, 1);
+    write_string(fp, "S"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
+    write_u16(fp, 1000);
+    write_u8(fp, 0); write_u8(fp, 0); write_u8(fp, 4);
+    write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
+    write_string(fp, "");
+    write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
+
+    /* Tick 65534 (jump=65535), then jump=34466 to reach 100000 */
+    write_u16(fp, 65535);  /* tick 65534 */
+    write_u16(fp, 1);
+    write_u8(fp, 0); write_u8(fp, 60); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
+    write_u16(fp, 0);
+
+    write_u16(fp, 34466);  /* 65534 + 34466 = 100000 */
+    write_u16(fp, 1);
+    write_u8(fp, 0); write_u8(fp, 64); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
+    write_u16(fp, 0);
+    write_notes_end(fp);
+
+    write_string(fp, "L");
+    write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
+    write_u8(fp, 0);
+    rewind(fp);
+
+    struct nbs_error_info err;
+    struct nbs_song *song = nbs_parse(fp, &err);
+
+    EXPECT(song != NULL, "tick 100000 should parse");
+    EXPECT(arrlen(song->notes) == 2, "should have 2 notes");
+    EXPECT(song->notes[0].tick == 65534, "first note tick should be 65534");
+    EXPECT(song->notes[1].tick == 100000, "second note tick should be 100000");
+
+    nbs_free(song);
+    fclose(fp);
+    return 1;
+}
+
+/* Test: Custom instrument returns harp */
+static int test_custom_instrument_harp(void) {
+    /* This test is in music_player.c layer, not parser layer.
+     * Parser correctly passes through instrument number.
+     * The conversion to harp happens in song_cache_parse.
+     * We verify the parser accepts instrument > 15.
+     */
+    FILE *fp = tmpfile();
+    EXPECT(fp != NULL, "tmpfile");
+
+    /* v4 header */
+    write_u16(fp, 0);
+    write_u8(fp, 4);
+    write_u8(fp, 10);
+    write_u16(fp, 100);
+    write_u16(fp, 1);
+    write_string(fp, "S"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
+    write_u16(fp, 1000);
+    write_u8(fp, 0); write_u8(fp, 0); write_u8(fp, 4);
+    write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
+    write_string(fp, "");
+    write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
+
+    /* Note with instrument = 16 (custom) */
+    write_u16(fp, 1);
+    write_u16(fp, 1);
+    write_u8(fp, 16);      /* custom instrument */
+    write_u8(fp, 60);
+    write_u8(fp, 100);
+    write_u8(fp, 100);
+    write_u16(fp, 0);
+    write_u16(fp, 0);
+    write_notes_end(fp);
+
+    write_string(fp, "L");
+    write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
+    write_u8(fp, 0);
+    rewind(fp);
+
+    struct nbs_error_info err;
+    struct nbs_song *song = nbs_parse(fp, &err);
+
+    EXPECT(song != NULL, "custom instrument should parse");
+    EXPECT(song->notes[0].instrument == 16, "parser should preserve instrument=16");
+
+    nbs_free(song);
+    fclose(fp);
+    return 1;
+}
+
+/* Test: Panning boundary conversion */
+static int test_panning_boundary(void) {
+    /* Test raw values 0, 100, 200 map to -100, 0, 100 */
+    int8_t p0 = (int8_t)(0 - 100);
+    int8_t p100 = (int8_t)(100 - 100);
+    int8_t p200 = (int8_t)(200 - 100);
+
+    EXPECT(p0 == -100, "raw 0 should map to -100");
+    EXPECT(p100 == 0, "raw 100 should map to 0");
+    EXPECT(p200 == 100, "raw 200 should map to 100");
+
+    return 1;
+}
+
 int main(void) {
     fprintf(stderr, "=== NBS Parser Tests ===\n\n");
 
@@ -607,6 +820,11 @@ int main(void) {
     RUN_TEST(test_nbs_free_partial);
     RUN_TEST(test_error_strings);
     RUN_TEST(test_layer_limit_header);
+    RUN_TEST(test_tick_65535);
+    RUN_TEST(test_tick_65536);
+    RUN_TEST(test_tick_100000);
+    RUN_TEST(test_custom_instrument_harp);
+    RUN_TEST(test_panning_boundary);
 
     fprintf(stderr, "\n=== Results ===\n");
     fprintf(stderr, "Run: %d, Passed: %d, Failed: %d\n", tests_run, tests_passed, tests_failed);

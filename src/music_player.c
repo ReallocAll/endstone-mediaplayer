@@ -17,14 +17,6 @@
 #include <time.h>
 #endif
 
-/* Internal error info for song cache parsing */
-struct song_parse_error {
-    enum nbs_error_code nbs;
-    int64_t file_offset;
-    uint32_t tick;
-    uint32_t layer;
-};
-
 struct music_player_ctx g_music_ctx;
 
 // --- Path management ---
@@ -150,10 +142,6 @@ void music_player_shutdown(void)
 }
 
 // --- Song cache ---
-static int64_t song_parse_error_offset;
-static uint32_t song_parse_error_tick;
-static uint32_t song_parse_error_layer;
-
 long long song_cache_parse(FILE *fp, const char *song_name, struct nbs_error_info *out_error)
 {
     struct nbs_error_info nbs_err;

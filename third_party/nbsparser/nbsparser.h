@@ -11,15 +11,25 @@
  *   instruments: 255 × 24 bytes ≈ 6 KiB
  *   strings:    limited individually; total bounded by file size
  * Total well within typical server memory budgets.
+ *
+ * These limits prevent malicious inputs while supporting large legitimate files.
  */
-#define NBS_MAX_STRING_LEN   (1048576U)  /* 1 MiB per string — NBS spec has no string limit */
-#define NBS_MAX_NOTES        (1000000U)  /* 1M notes — supports ~3 hour songs at 20 TPS */
+#define NBS_MAX_STRING_LEN   (1048576U)  /* 1 MiB per string */
+#define NBS_MAX_NOTES        (1000000U)  /* 1M notes — memory/buffer limit */
 #define NBS_MAX_LAYERS       (1024U)     /* 1024 layers — far beyond practical use */
 #define NBS_MAX_INSTRUMENTS  (255U)      /* Format limit: uint8_t count field */
 
 /* NBS format version support */
 #define NBS_VERSION_MIN  (0U)
 #define NBS_VERSION_MAX  (5U)
+
+/* String read result codes — returned by nbs_read_string_raw_ex */
+enum nbs_read_result {
+    NBS_READ_OK = 0,
+    NBS_READ_EOF,
+    NBS_READ_LIMIT,
+    NBS_READ_NOMEM,
+};
 
 /* Error codes describing failure category */
 enum nbs_error_code {

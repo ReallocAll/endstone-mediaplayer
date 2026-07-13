@@ -77,6 +77,9 @@ if(PLUGINS_DIR)
         LIBRARY DESTINATION "${PLUGINS_DIR}")
 endif()
 
+# Sanitizer support (optional, off by default)
+option(ENABLE_SANITIZER "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
 # Unit tests
 enable_testing()
 add_executable(test_nbs_parser tests/test_nbs_parser.c
@@ -90,4 +93,19 @@ target_compile_definitions(test_nbs_parser PRIVATE
 set_target_properties(test_nbs_parser PROPERTIES
     C_STANDARD 23
     C_STANDARD_REQUIRED ON)
+
+if(ENABLE_SANITIZER)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_options(test_nbs_parser PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(test_nbs_parser PRIVATE
+            -fsanitize=address,undefined)
+    elseif(WIN32)
+        target_compile_options(test_nbs_parser PRIVATE
+            -fsanitize=address)
+        target_link_options(test_nbs_parser PRIVATE
+            -fsanitize=address)
+    endif()
+endif()
+
 add_test(NAME nbs_parser COMMAND test_nbs_parser)
