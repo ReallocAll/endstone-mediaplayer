@@ -1,142 +1,138 @@
-/**
- * endstone_api.c — Endstone API wrappers for pure C.
- *
- * Player methods (playSound, sendPopup, sendTip, getLocation), BossBar helpers,
- * sendMessage, and UTF-8 file open.  All vtable dispatch goes through
- * the VCALL/STR_GUARD macros from abi_helpers.h.
- */
-
 #include "abi_helpers.h"
 #include "music_player.h"
 #include <cppcompat/string.h>
-#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
-#ifdef _WIN32
+#if ES_PLATFORM_WINDOWS
 #include <windows.h>
 #endif
 
-/* =====================================================================
- *  Global plugin pointer (set by plugin.c)
- * ===================================================================== */
-
 extern void *g_plugin;
-
-/* =====================================================================
- *  UTF-8 file open helper
- * ===================================================================== */
 
 FILE *fopen_utf8(const char *path, const char *mode)
 {
-#ifdef _WIN32
-    wchar_t wpath[MAX_PATH_LEN], wmode[8];
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH_LEN);
-    MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 8);
-    return _wfopen(wpath, wmode);
+#if ES_PLATFORM_WINDOWS
+    wchar_t wide_path[MAX_PATH_LEN];
+    wchar_t wide_mode[8];
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide_path, MAX_PATH_LEN);
+    MultiByteToWideChar(CP_UTF8, 0, mode, -1, wide_mode, 8);
+    return _wfopen(wide_path, wide_mode);
 #else
     return fopen(path, mode);
 #endif
 }
 
-/* =====================================================================
- *  sendMessage
- * ===================================================================== */
-
-void sender_send_message(void *sender, const char *msg)
+void sender_send_message(void *sender, const char *text)
 {
+    _Alignas(8) unsigned char message[ES_MESSAGE_SIZE];
     if (!sender) return;
-    char message[ES_MESSAGE_SIZE];
-    memset(message, 0, ES_MESSAGE_SIZE);
-    cpp_string_construct(message + ES_MESSAGE_OFF_STRING, msg);
-    *(int32_t *)(message + ES_MESSAGE_OFF_INDEX) = 1;
-    VCALL1(sender, ES_SENDER_SLOT_SEND_MESSAGE, void, void *, message);
+    memset(message, 0, sizeof(message));
+    cpp_string_construct(message + ES_MESSAGE_OFF_STRING, text);
+    *(size_t *)(message + ES_MESSAGE_OFF_INDEX) = ES_MESSAGE_STRING_INDEX;
+    VCALL1(sender, ES_SENDER_SLOT_SEND_MESSAGE, void, const void *, message);
     cpp_string_destroy(message + ES_MESSAGE_OFF_STRING);
 }
-
-/* =====================================================================
- *  Player API wrappers
- * ===================================================================== */
 
 void player_get_location(void *player, struct es_location *out)
 {
     if (!player || !out) return;
-    VCALL1(player, ES_PLAYER_SLOT_GET_LOCATION, void *, void *, out);
+#if ES_PLATFORM_LINUX
+    *out = ((struct es_location (*)(void *))
+        VTABLE(player)[ES_PLAYER_SLOT_GET_LOCATION])(player);
+#else
+    ((void (*)(void *, struct es_location *))
+        VTABLE(player)[ES_PLAYER_SLOT_GET_LOCATION])(player, out);
+#endif
 }
 
-/* playSound takes Location + std::string BY VALUE — callee destroys the string. */
 void player_play_sound(void *player, const char *sound, float volume, float pitch)
 {
+    struct es_location location;
+    _Alignas(8) unsigned char string[ES_STRING_SIZE];
     if (!player) return;
-    struct es_location loc;
-    memset(&loc, 0, sizeof(loc));
-    player_get_location(player, &loc);
-
-    char str[ES_STRING_SIZE];
-    cpp_string_construct(str, sound);
-    STR_GUARD(str, VCALL4(player, ES_PLAYER_SLOT_PLAY_SOUND, void,
-                          void *, &loc, void *, str,
-                          float, volume, float, pitch));
+    memset(&location, 0, sizeof(location));
+    player_get_location(player, &location);
+    cpp_string_construct(string, sound);
+#if ES_PLATFORM_LINUX
+    ((void (*)(void *, struct es_location, void *, float, float))
+        VTABLE(player)[ES_PLAYER_SLOT_PLAY_SOUND])(
+            player, location, string, volume, pitch);
+    memset(string, 0, sizeof(string));
+#else
+    STR_GUARD(string,
+        VCALL4(player, ES_PLAYER_SLOT_PLAY_SOUND, void,
+               void *, &location, void *, string, float, volume, float, pitch));
+#endif
 }
 
-/* sendPopup takes std::string BY VALUE. */
-void player_send_popup(void *player, const char *msg)
+void player_send_popup(void *player, const char *text)
 {
+    _Alignas(8) unsigned char string[ES_STRING_SIZE];
     if (!player) return;
-    char str[ES_STRING_SIZE];
-    cpp_string_construct(str, msg);
-    STR_GUARD(str, VCALL1(player, ES_PLAYER_SLOT_SEND_POPUP, void, void *, str));
+    cpp_string_construct(string, text);
+    STR_GUARD(string,
+        VCALL1(player, ES_PLAYER_SLOT_SEND_POPUP, void, void *, string));
 }
 
-/* sendTip takes std::string BY VALUE. */
-void player_send_tip(void *player, const char *msg)
+void player_send_tip(void *player, const char *text)
 {
+    _Alignas(8) unsigned char string[ES_STRING_SIZE];
     if (!player) return;
-    char str[ES_STRING_SIZE];
-    cpp_string_construct(str, msg);
-    STR_GUARD(str, VCALL1(player, ES_PLAYER_SLOT_SEND_TIP, void, void *, str));
+    cpp_string_construct(string, text);
+    STR_GUARD(string,
+        VCALL1(player, ES_PLAYER_SLOT_SEND_TIP, void, void *, string));
 }
 
-/* =====================================================================
- *  BossBar helpers
- * ===================================================================== */
-
-/* createBossBar does std::move(title) — the string is moved, not destroyed. */
 void *boss_bar_create(void *player, const char *title)
 {
-    if (!g_plugin || !player) return nullptr;
-    void *server = PLUGIN_SERVER(g_plugin);
-    if (!server) return nullptr;
-
-    char str[ES_STRING_SIZE];
-    cpp_string_construct(str, title);
-    char result[8] = {0};
+    void *server;
+    void *boss;
+    _Alignas(8) unsigned char string[ES_STRING_SIZE];
+    _Alignas(8) void *result = NULL;
+    if (!g_plugin || !player) return NULL;
+    server = PLUGIN_SERVER(g_plugin);
+    if (!server) return NULL;
+    cpp_string_construct(string, title);
+#if ES_PLATFORM_LINUX
+    ((void (*)(void *, void *, void *, int, int))
+        VTABLE(server)[ES_SERVER_SLOT_CREATE_BOSS_BAR])(
+            &result, server, string, ES_BAR_COLOR_GREEN, ES_BAR_STYLE_SOLID);
+    memset(string, 0, sizeof(string));
+#else
     VCALL4(server, ES_SERVER_SLOT_CREATE_BOSS_BAR, void,
-           void *, result, void *, str, int, ES_BAR_COLOR_GREEN, int, ES_BAR_STYLE_SOLID);
-    void *bb = *(void **)result;
-    cpp_string_destroy(str);  // string was moved — safe
-
-    if (!bb) return nullptr;
-    VCALL1(bb, ES_BOSSBAR_SLOT_ADD_PLAYER, void, void *, player);
-    return bb;
+           void *, &result, void *, string,
+           int, ES_BAR_COLOR_GREEN, int, ES_BAR_STYLE_SOLID);
+    cpp_string_destroy(string);
+#endif
+    boss = result;
+    if (boss) VCALL1(boss, ES_BOSSBAR_SLOT_ADD_PLAYER, void, void *, player);
+    return boss;
 }
 
-void boss_bar_destroy(void *bb)
+void boss_bar_destroy(void *boss)
 {
-    if (!bb) return;
-    VCALL1(bb, ES_BOSSBAR_SLOT_SET_VISIBLE, void, bool, false);
-    VCALL1(bb, ES_BOSSBAR_SLOT_DTOR, void, int, 1);
+    if (!boss) return;
+    VCALL1(boss, ES_BOSSBAR_SLOT_SET_VISIBLE, void, bool, false);
+#if ES_PLATFORM_LINUX
+    ((void (*)(void *))VTABLE(boss)[ES_BOSSBAR_SLOT_DTOR])(boss);
+#else
+    VCALL1(boss, ES_BOSSBAR_SLOT_DTOR, void, int, 1);
+#endif
 }
 
-void boss_bar_set_progress(void *bb, float progress)
+void boss_bar_set_progress(void *boss, float progress)
 {
-    if (!bb) return;
-    VCALL1(bb, ES_BOSSBAR_SLOT_SET_PROGRESS, void, float, progress);
+    if (boss)
+        VCALL1(boss, ES_BOSSBAR_SLOT_SET_PROGRESS, void, float, progress);
 }
 
-void boss_bar_set_title(void *bb, const char *title)
+void boss_bar_set_title(void *boss, const char *title)
 {
-    if (!bb) return;
-    char str[ES_STRING_SIZE];
-    cpp_string_construct(str, title);
-    STR_GUARD(str, VCALL1(bb, ES_BOSSBAR_SLOT_SET_TITLE, void, void *, str));
+    _Alignas(8) unsigned char string[ES_STRING_SIZE];
+    if (!boss) return;
+    cpp_string_construct(string, title);
+    STR_GUARD(string,
+        VCALL1(boss, ES_BOSSBAR_SLOT_SET_TITLE, void, void *, string));
 }

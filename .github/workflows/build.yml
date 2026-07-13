@@ -23,7 +23,51 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: endstone_mediaplayer
+          name: endstone_mediaplayer-windows
           path: |
             build/endstone_mediaplayer.dll
             build/endstone_mediaplayer.pdb
+          retention-days: 1
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install LLVM and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build
+
+      - name: Build
+        run: |
+          cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build
+          cmake --build build --parallel
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: endstone_mediaplayer-linux
+          path: build/endstone_mediaplayer.so
+          retention-days: 1
+
+  package:
+    needs: [build-win, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build files
+        uses: actions/download-artifact@v7
+        with:
+          pattern: endstone_mediaplayer-*
+          path: artifact
+          merge-multiple: true
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: endstone_mediaplayer
+          path: |
+            artifact/endstone_mediaplayer.dll
+            artifact/endstone_mediaplayer.pdb
+            artifact/endstone_mediaplayer.so

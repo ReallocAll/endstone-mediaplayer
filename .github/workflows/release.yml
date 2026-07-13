@@ -27,7 +27,7 @@ on:
         default: false
         type: boolean
       rel_tag:
-        description: 'Release tag (e.g. 2.0.0)'
+        description: 'Release tag (e.g. 2.1.0)'
         required: false
         default: ''
         type: string
@@ -43,60 +43,152 @@ on:
         type: string
 
 jobs:
-  release:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.rel_info.outputs.tag_name }}
+      title: ${{ steps.rel_info.outputs.title }}
+      desc_body: ${{ steps.rel_info.outputs.desc_body }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set release info
+        id: rel_info
+        env:
+          INPUT_TAG: ${{ inputs.rel_tag }}
+          INPUT_TITLE: ${{ inputs.rel_title }}
+          INPUT_DESC: ${{ inputs.rel_desc }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            title="v$tag"
+            current_ref="$GITHUB_SHA"
+            previous_tag="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
+          else
+            tag="$INPUT_TAG"
+            title="${INPUT_TITLE:-v$INPUT_TAG}"
+            current_ref="$GITHUB_SHA"
+            previous_tag="$(git describe --tags --abbrev=0 "$GITHUB_SHA" 2>/dev/null || true)"
+            if [ -n "$INPUT_DESC" ]; then
+              desc="$INPUT_DESC"
+            fi
+          fi
+
+          if [ -z "${desc:-}" ]; then
+            if [ -n "$previous_tag" ]; then
+              range="$previous_tag..$current_ref"
+              heading="## Changes from $previous_tag to v$tag"
+            else
+              range="$current_ref"
+              heading="## Changes in v$tag"
+            fi
+            changes="$(git log --pretty=format:'- %s (`%h`)' "$range")"
+            desc="$(printf '%s\n\n%s' "$heading" "$changes")"
+          fi
+
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+          delimiter="release_desc_$(date +%s%N)"
+          echo "desc_body<<$delimiter" >> "$GITHUB_OUTPUT"
+          echo "$desc" >> "$GITHUB_OUTPUT"
+          echo "$delimiter" >> "$GITHUB_OUTPUT"
+
+  build-win:
+    needs: prepare
     runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set release info
-        id: rel_info
-        shell: bash
-        run: |
-          echo "build_time=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
-          # Tag push: extract version from GITHUB_REF_NAME (v2.0.1 -> 2.0.1)
-          if [ "${{ github.event_name }}" = "push" ]; then
-            TAG="${GITHUB_REF_NAME#v}"
-            echo "tag_name=$TAG" >> $GITHUB_OUTPUT
-            echo "title=v$TAG" >> $GITHUB_OUTPUT
-            echo "desc_body=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
-          else
-            echo "tag_name=${{ inputs.rel_tag }}" >> $GITHUB_OUTPUT
-            if [ -z "${{ inputs.rel_title }}" ]; then
-              echo "title=v${{ inputs.rel_tag }}" >> $GITHUB_OUTPUT
-            else
-              echo "title=${{ inputs.rel_title }}" >> $GITHUB_OUTPUT
-            fi
-            if [ -z "${{ inputs.rel_desc }}" ]; then
-              echo "desc_body=$(git log -1 --pretty=%B)" >> $GITHUB_OUTPUT
-            else
-              echo "desc_body=${{ inputs.rel_desc }}" >> $GITHUB_OUTPUT
-            fi
-          fi
-
       - name: Install LLVM and Ninja
         run: choco install llvm ninja --no-progress
 
       - name: Build
+        shell: pwsh
+        env:
+          BUILD_TYPE: ${{ inputs.solution || 'RelWithDebInfo' }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
         run: |
-          $tag = "${{ steps.rel_info.outputs.tag_name }}"
-          $cmake_args = "-G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build"
-          if ($tag -ne "") { $cmake_args += " -DMP_VERSION=$tag" }
-          Invoke-Expression "cmake $cmake_args"
-          cmake --build build -j
+          $cmakeArgs = @(
+            '-G', 'Ninja',
+            '-DCMAKE_C_COMPILER=clang-cl',
+            "-DCMAKE_BUILD_TYPE=$env:BUILD_TYPE",
+            '-S', '.',
+            '-B', 'build'
+          )
+          if ($env:RELEASE_TAG) {
+            $cmakeArgs += "-DMP_VERSION=$env:RELEASE_TAG"
+          }
+          cmake @cmakeArgs
+          cmake --build build --parallel
 
-      - name: Organize files
-        run: |
-          mkdir release
-          cp build/endstone_mediaplayer.dll release/
-          cp build/endstone_mediaplayer.pdb release/
-
-      - name: Zip Release
-        uses: TheDoctor0/zip-release@0.7.6
+      - name: Upload Windows files
+        uses: actions/upload-artifact@v7
         with:
-          filename: endstone_mediaplayer_v${{ steps.rel_info.outputs.tag_name }}.zip
-          path: .
-          directory: release
+          name: release-windows
+          path: |
+            build/endstone_mediaplayer.dll
+            build/endstone_mediaplayer.pdb
+          retention-days: 1
+
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install LLVM and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build
+
+      - name: Build
+        env:
+          BUILD_TYPE: ${{ inputs.solution || 'RelWithDebInfo' }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
+        run: |
+          cmake_args=(
+            -G Ninja
+            -DCMAKE_C_COMPILER=clang
+            "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+            -S .
+            -B build
+          )
+          if [ -n "$RELEASE_TAG" ]; then
+            cmake_args+=("-DMP_VERSION=$RELEASE_TAG")
+          fi
+          cmake "${cmake_args[@]}"
+          cmake --build build --parallel
+
+      - name: Upload Linux files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux
+          path: build/endstone_mediaplayer.so
+          retention-days: 1
+
+  release:
+    needs: [prepare, build-win, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release files
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Package release
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
+        run: |
+          zip -j "endstone_mediaplayer_v$RELEASE_TAG.zip" release/*
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -104,16 +196,16 @@ jobs:
         with:
           name: endstone_mediaplayer
           path: |
-            build/endstone_mediaplayer.dll
-            build/endstone_mediaplayer.pdb
+            release/endstone_mediaplayer.dll
+            release/endstone_mediaplayer.pdb
+            release/endstone_mediaplayer.so
 
-      - name: Create Release
+      - name: Create release
         uses: softprops/action-gh-release@v3.0.1
         if: github.event_name == 'push' || inputs.release
         with:
-          tag_name: v${{ steps.rel_info.outputs.tag_name }}
-          name: ${{ steps.rel_info.outputs.title }}
+          tag_name: v${{ needs.prepare.outputs.tag_name }}
+          name: ${{ needs.prepare.outputs.title }}
           prerelease: ${{ github.event_name == 'push' && false || inputs.pre_release }}
-          body: ${{ steps.rel_info.outputs.desc_body }}
-          files: |
-            release/endstone_mediaplayer_v${{ steps.rel_info.outputs.tag_name }}.zip
+          body: ${{ needs.prepare.outputs.desc_body }}
+          files: endstone_mediaplayer_v${{ needs.prepare.outputs.tag_name }}.zip

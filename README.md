@@ -16,14 +16,14 @@ An [Endstone](https://github.com/EndstoneMC/endstone) plugin that plays NBS musi
 
 ## Installation
 
-1. Place `endstone_mediaplayer.dll` into your `plugins/` directory
+1. Place `endstone_mediaplayer.dll` (Windows) or `endstone_mediaplayer.so` (Linux) into your `plugins/` directory
 2. Create `plugins/endstone_mediaplayer/nbs/`
 3. Put your `.nbs` files into the `nbs/` directory
 4. Start the server
 
 ```
 plugins/
-├── endstone_mediaplayer.dll
+├── endstone_mediaplayer.dll / endstone_mediaplayer.so
 └── endstone_mediaplayer/
     └── nbs/
         ├── song1.nbs
@@ -50,19 +50,27 @@ plugins/
 
 ## Building
 
-**Requirements:** CMake 3.29+, Ninja, Clang 22+ (`clang-cl`)
+**Requirements:** CMake 3.21+, Ninja, Clang in C mode (`clang-cl` on Windows, `clang` on Linux), and LLD on Linux
 
+Windows:
 ```bash
 cmake -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build
 cmake --build build
 ```
 
-Output: `build/endstone_mediaplayer.dll`
+Linux:
+```bash
+cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build-linux
+cmake --build build-linux
+```
+
+Output: `endstone_mediaplayer.dll` on Windows or `endstone_mediaplayer.so` on Linux.
 
 ## Architecture
 
 - **Language**: C23
-- **Third-party**: `third_party/` — cppcompat (MSVC STL compatibility), nbsparser (NBS parsing), stb_ds (MIT, dynamic arrays)
+- **Platforms**: one business codebase with isolated MSVC and libc++ ABI layers
+- **Third-party**: `third_party/` — cppcompat, nbsparser (NBS parsing), stb_ds (MIT, dynamic arrays)
 
 ## License
 

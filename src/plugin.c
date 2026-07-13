@@ -27,8 +27,18 @@ static void plugin_on_load(void *self);
 static void plugin_on_enable(void *self);
 static void plugin_on_disable(void *self);
 
+#if ES_PLATFORM_LINUX
+static void plugin_complete_destructor(void *self) { plugin_destructor(self, 0); }
+static void plugin_deleting_destructor(void *self) { plugin_destructor(self, 1); }
+#endif
+
 static void *g_vtable[ES_VTABLE_SLOT_COUNT] = {
+#if ES_PLATFORM_LINUX
+    (void *)plugin_complete_destructor,
+    (void *)plugin_deleting_destructor,
+#else
     (void *)plugin_destructor,
+#endif
     (void *)plugin_on_command,
     (void *)plugin_get_description,
     (void *)plugin_on_load,
@@ -57,14 +67,14 @@ static void description_init(char *desc)
     DESC_STRING(desc, ES_DESC_OFF_PREFIX,      "MediaPlayer");
     *(int32_t *)(desc + ES_DESC_OFF_LOAD) = ES_LOAD_POST_WORLD;
     *(int32_t *)(desc + ES_DESC_OFF_DEFAULT_PERM) = ES_PERM_OPERATOR;
-    DESC_VECTOR(desc, ES_DESC_OFF_AUTHORS,      32);
-    DESC_VECTOR(desc, ES_DESC_OFF_CONTRIBUTORS,  32);
-    DESC_VECTOR(desc, ES_DESC_OFF_PROVIDES,      32);
-    DESC_VECTOR(desc, ES_DESC_OFF_DEPEND,        32);
-    DESC_VECTOR(desc, ES_DESC_OFF_SOFT_DEPEND,   32);
-    DESC_VECTOR(desc, ES_DESC_OFF_LOAD_BEFORE,   32);
-    DESC_VECTOR(desc, ES_DESC_OFF_COMMANDS,      152);
-    DESC_VECTOR(desc, ES_DESC_OFF_PERMISSIONS,   144);
+    DESC_VECTOR(desc, ES_DESC_OFF_AUTHORS,      ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_CONTRIBUTORS, ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_PROVIDES,      ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_DEPEND,        ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_SOFT_DEPEND,   ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_LOAD_BEFORE,   ES_STRING_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_COMMANDS,      ES_COMMAND_SIZE);
+    DESC_VECTOR(desc, ES_DESC_OFF_PERMISSIONS,   ES_PERMISSION_SIZE);
 }
 
 #undef DESC_STRING
@@ -103,8 +113,18 @@ static void  cmd_dtor(void *self, int f)        { (void)self; (void)f; }
 static bool  cmd_exec(void *s, void *nd, const void *a) { (void)s;(void)nd;(void)a; return false; }
 static void *cmd_as_pcmd(void *self)             { (void)self; return nullptr; }
 
+#if ES_PLATFORM_LINUX
+static void cmd_complete_dtor(void *self) { cmd_dtor(self, 0); }
+static void cmd_deleting_dtor(void *self) { cmd_dtor(self, 1); }
+#endif
+
 static void *g_cmd_vtable[ES_CMD_VTABLE_SLOT_COUNT] = {
-    (void *)cmd_dtor, (void *)cmd_exec, (void *)cmd_as_pcmd,
+#if ES_PLATFORM_LINUX
+    (void *)cmd_complete_dtor, (void *)cmd_deleting_dtor,
+#else
+    (void *)cmd_dtor,
+#endif
+    (void *)cmd_exec, (void *)cmd_as_pcmd,
 };
 
 static void command_init(char *cmd, const char *name, const char *desc)
@@ -113,15 +133,6 @@ static void command_init(char *cmd, const char *name, const char *desc)
     *(void **)cmd = g_cmd_vtable;
     cpp_string_construct(cmd + ES_COMMAND_OFF_NAME, name);
     cpp_string_construct(cmd + ES_COMMAND_OFF_DESC, desc);
-}
-
-static void command_destroy(char *cmd)
-{
-    cpp_string_destroy(cmd + ES_COMMAND_OFF_NAME);
-    cpp_string_destroy(cmd + ES_COMMAND_OFF_DESC);
-    cpp_vector_destroy(cmd + ES_COMMAND_OFF_ALIASES);
-    cpp_vector_destroy(cmd + ES_COMMAND_OFF_USAGES);
-    cpp_vector_destroy(cmd + ES_COMMAND_OFF_PERMS);
 }
 
 /* =====================================================================
@@ -304,7 +315,7 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
             return;
         }
         struct player_music *pm = &g_music_ctx.online_players[pos];
-        if ((size_t)idx >= arrlen(pm->playlist)) {
+        if ((size_t)idx >= (size_t)arrlen(pm->playlist)) {
             snprintf(msg, sizeof(msg),
                      MC_RED "[MediaPlayer] " MC_GRAY "Index out of range " MC_YELLOW "(max %d)",
                      (int)arrlen(pm->playlist) - 1);
@@ -420,12 +431,12 @@ static void handle_mpm(void *sender, int argc, const char *argv[])
 
 static void on_player_join(void *event)
 {
-    void *player = *(void **)((char *)event + 16);
+    void *player = *(void **)((char *)event + ES_PLAYER_EVENT_OFF_PLAYER);
     if (player) music_player_on_join(player);
 }
 static void on_player_quit(void *event)
 {
-    void *player = *(void **)((char *)event + 16);
+    void *player = *(void **)((char *)event + ES_PLAYER_EVENT_OFF_PLAYER);
     if (player) music_player_on_quit(player);
 }
 
@@ -444,9 +455,9 @@ static void plugin_register_event(void *self, const char *event_name,
     func_impl_t *impl = sfunc_alloc(handler, false);
     if (!impl) return;
 
-    char event_str[ES_STRING_SIZE];
+    _Alignas(8) unsigned char event_str[ES_STRING_SIZE];
     cpp_string_construct(event_str, event_name);
-    char std_fn[ES_STD_FUNCTION_SIZE];
+    _Alignas(8) unsigned char std_fn[ES_STD_FUNCTION_SIZE];
     SFUNC_BUILD(std_fn, impl);
     VCALL5(pm, ES_PM_SLOT_REGISTER_EVENT, void,
            void *, event_str, void *, std_fn, int, priority, void *, self, int, 0);
@@ -463,10 +474,10 @@ static void scheduler_register_tick(void *self)
     func_impl_t *impl = sfunc_alloc((void *)music_player_tick, true);
     if (!impl) return;
 
-    char std_fn[ES_STD_FUNCTION_SIZE];
+    _Alignas(8) unsigned char std_fn[ES_STD_FUNCTION_SIZE];
     SFUNC_BUILD(std_fn, impl);
 
-    char result[16] = {0};
+    _Alignas(8) unsigned char result[16] = {0};
     VCALL5(scheduler, ES_SCHEDULER_SLOT_RUN_TIMER, void *,
            void *, result, void *, self, void *, std_fn, uint64_t, 0ULL, uint64_t, 1ULL);
 }
@@ -534,10 +545,10 @@ static void plugin_on_disable(void *self)
  *  Entry point
  * ===================================================================== */
 
-static char g_commands[1][ES_COMMAND_SIZE];
-static char g_mpm_usages[9][ES_STRING_SIZE];
+_Alignas(8) static char g_commands[1][ES_COMMAND_SIZE];
+_Alignas(8) static char g_mpm_usages[9][ES_STRING_SIZE];
 
-__declspec(dllexport) void *init_endstone_plugin(void)
+ES_EXPORT void *init_endstone_plugin(void)
 {
     char *obj = (char *)calloc(1, ES_PLUGIN_IMPL_SIZE);
     if (!obj) return nullptr;

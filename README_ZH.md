@@ -16,14 +16,14 @@
 
 ## 安装
 
-1. 将 `endstone_mediaplayer.dll` 放入 `plugins/` 目录
+1. 将 `endstone_mediaplayer.dll`（Windows）或 `endstone_mediaplayer.so`（Linux）放入 `plugins/` 目录
 2. 创建 `plugins/endstone_mediaplayer/nbs/` 目录
 3. 将 `.nbs` 文件放入 `nbs/` 目录
 4. 启动服务器
 
 ```
 plugins/
-├── endstone_mediaplayer.dll
+├── endstone_mediaplayer.dll / endstone_mediaplayer.so
 └── endstone_mediaplayer/
     └── nbs/
         ├── song1.nbs
@@ -50,19 +50,27 @@ plugins/
 
 ## 构建
 
-**依赖：** CMake 3.29+、Ninja、Clang 22+（`clang-cl`）
+**依赖：** CMake 3.21+、Ninja、C 模式 Clang（Windows 使用 `clang-cl`，Linux 使用 `clang`），Linux 还需要 LLD
 
+Windows：
 ```bash
 cmake -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build
 cmake --build build
 ```
 
-产物：`build/endstone_mediaplayer.dll`
+Linux：
+```bash
+cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build-linux
+cmake --build build-linux
+```
+
+产物：Windows 为 `endstone_mediaplayer.dll`，Linux 为 `endstone_mediaplayer.so`。
 
 ## 技术架构
 
 - **语言**：C23
-- **第三方库**：`third_party/` — cppcompat（MSVC STL 兼容）、nbsparser（NBS 解析）、stb_ds（MIT，动态数组）
+- **平台结构**：业务源码共用，MSVC/libc++ ABI 层隔离
+- **第三方库**：`third_party/` — cppcompat、nbsparser（NBS 解析）、stb_ds（MIT，动态数组）
 
 ## 许可
 

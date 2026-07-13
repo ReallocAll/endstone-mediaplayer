@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "music_player.h"
 #include "nbsparser.h"
 #include "abi_helpers.h"
@@ -13,6 +14,7 @@
 #else
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 #endif
 
 struct music_player_ctx g_music_ctx;
@@ -279,7 +281,7 @@ enum player_op_result player_music_dequeue(void *player, size_t index)
     if (pos < 0) return PLAYER_NO_PLAYLIST;
 
     struct player_music *pm = &g_music_ctx.online_players[pos];
-    if (index >= arrlen(pm->playlist)) return PLAYER_INDEX_OUT_OF_RANGE;
+    if (index >= (size_t)arrlen(pm->playlist)) return PLAYER_INDEX_OUT_OF_RANGE;
 
     // Clean up boss bar for the entry being removed
     if (pm->playlist[index].boss_bar) {
@@ -294,8 +296,8 @@ enum player_op_result player_music_dequeue(void *player, size_t index)
             arrdelswap(g_music_ctx.online_players, (int)pos);
         } else {
             pm = &g_music_ctx.online_players[pos];
-            if (pm->current_track >= arrlen(pm->playlist))
-                pm->current_track = arrlen(pm->playlist) - 1;
+            if (pm->current_track >= (size_t)arrlen(pm->playlist))
+                pm->current_track = (size_t)arrlen(pm->playlist) - 1;
             pm->playlist[pm->current_track].start_ms = 0;
             pm->playlist[pm->current_track].cursor = 0;
         }
