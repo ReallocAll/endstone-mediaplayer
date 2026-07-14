@@ -1,5 +1,13 @@
 #ifndef NBS_PARSER_H
 #define NBS_PARSER_H
+
+/* POSIX feature-test macro for ftello() - must be defined before system headers */
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -8,7 +16,7 @@
  * Memory estimate per nbs_song at max limits:
  *   notes:      1M × 24 bytes = 24 MiB
  *   layers:     1024 × 40 bytes ≈ 41 KiB
- *   instruments: 255 × 24 bytes ≈ 6 KiB
+ *   instruments: 240 × 24 bytes ≈ 6 KiB
  *   strings:    limited individually; total bounded by file size
  * Total well within typical server memory budgets.
  *
@@ -17,7 +25,8 @@
 #define NBS_MAX_STRING_LEN   (1048576U)  /* 1 MiB per string */
 #define NBS_MAX_NOTES        (1000000U)  /* 1M notes — memory/buffer limit */
 #define NBS_MAX_LAYERS       (1024U)     /* 1024 layers — far beyond practical use */
-#define NBS_MAX_INSTRUMENTS  (255U)      /* Format limit: uint8_t count field */
+#define NBS_MAX_INSTRUMENTS  (240U)      /* NBS v5 spec limit for custom instruments */
+#define NBS_MAX_FILE_SIZE    (64 * 1024 * 1024U)  /* 64 MiB max file size */
 
 /* NBS format version support */
 #define NBS_VERSION_MIN  (0U)
@@ -57,9 +66,10 @@ enum nbs_section {
 struct nbs_error_info {
     enum nbs_error_code code;
     enum nbs_section    section;
-    int64_t             file_offset;  /* ftell position when error occurred */
-    uint32_t            tick;         /* current tick (notes section) */
-    uint32_t            layer;        /* current layer (notes section) */
+    int64_t             file_offset;    /* ftell position when error occurred */
+    uint32_t            tick;           /* current tick (notes section) */
+    uint32_t            layer;          /* current layer (notes section) */
+    uint8_t             actual_version; /* actual NBS version (for UNSUPPORTED_VERSION) */
 };
 
 static inline const char *nbs_error_string(enum nbs_error_code code)

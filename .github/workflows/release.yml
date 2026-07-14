@@ -124,6 +124,7 @@ jobs:
           }
           cmake @cmakeArgs
           cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
 
       - name: Upload Windows files
         uses: actions/upload-artifact@v7
@@ -163,6 +164,7 @@ jobs:
           fi
           cmake "${cmake_args[@]}"
           cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
 
       - name: Upload Linux files
         uses: actions/upload-artifact@v7

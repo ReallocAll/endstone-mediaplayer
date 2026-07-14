@@ -20,6 +20,10 @@ jobs:
           cmake -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build
           cmake --build build -j
 
+      - name: Run tests
+        run: |
+          ctest --test-dir build --output-on-failure
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -45,6 +49,10 @@ jobs:
           cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build
           cmake --build build --parallel
 
+      - name: Run tests
+        run: |
+          ctest --test-dir build --output-on-failure
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -52,8 +60,33 @@ jobs:
           path: build/endstone_mediaplayer.so
           retention-days: 1
 
+  sanitize-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install LLVM and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build
+
+      - name: Build with sanitizers
+        run: |
+          cmake -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_SANITIZER=ON \
+            -S . -B build-sanitized
+          cmake --build build-sanitized --parallel
+
+      - name: Run sanitized tests
+        run: |
+          ASAN_OPTIONS=detect_leaks=1 \
+          ctest --test-dir build-sanitized --output-on-failure
+
   package:
-    needs: [build-win, build-linux]
+    needs: [build-win, build-linux, sanitize-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Download build files

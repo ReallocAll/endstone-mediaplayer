@@ -15,14 +15,16 @@ static void set_error(struct nbs_error_info *out_error,
                       enum nbs_section section,
                       int64_t offset,
                       uint32_t tick,
-                      uint32_t layer)
+                      uint32_t layer,
+                      uint8_t actual_version)
 {
     if (!out_error) return;
-    out_error->code      = code;
-    out_error->section   = section;
-    out_error->file_offset = offset;
-    out_error->tick      = tick;
-    out_error->layer     = layer;
+    out_error->code          = code;
+    out_error->section       = section;
+    out_error->file_offset   = offset;
+    out_error->tick          = tick;
+    out_error->layer         = layer;
+    out_error->actual_version = actual_version;
 }
 
 /* Helper: get current file position, or -1 on error */
@@ -103,7 +105,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     ushort tempo = 0;
 
     if (fread(&song_length, sizeof(ushort), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
@@ -111,7 +113,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     if (song_length == 0) {
         offset = get_offset(fp);
         if (fread(&song->version, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -120,14 +122,14 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
 
     /* Validate version */
     if (song->version < NBS_VERSION_MIN || song->version > NBS_VERSION_MAX) {
-        set_error(out_error, NBS_ERROR_UNSUPPORTED_VERSION, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_UNSUPPORTED_VERSION, NBS_SECTION_HEADER, offset, 0, 0, song->version);
         return false;
     }
 
     offset = get_offset(fp);
     if (song->version > 0) {
         if (fread(&song->default_instruments, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -137,7 +139,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     offset = get_offset(fp);
     if (song->version >= 3) {
         if (fread(&song->song_length, sizeof(ushort), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -146,13 +148,13 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
 
     offset = get_offset(fp);
     if (fread(&song->song_layers, sizeof(ushort), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     /* Validate song_layers against resource limit */
     if (song->song_layers > NBS_MAX_LAYERS) {
-        set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
@@ -161,11 +163,11 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         enum nbs_read_result r = nbs_read_string_raw_ex(fp, &song->song_name, out_error);
         if (r != NBS_READ_OK) {
             if (r == NBS_READ_LIMIT) {
-                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else if (r == NBS_READ_NOMEM) {
-                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             }
             return false;
         }
@@ -176,11 +178,11 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         enum nbs_read_result r = nbs_read_string_raw_ex(fp, &song->song_author, out_error);
         if (r != NBS_READ_OK) {
             if (r == NBS_READ_LIMIT) {
-                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else if (r == NBS_READ_NOMEM) {
-                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             }
             return false;
         }
@@ -191,11 +193,11 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         enum nbs_read_result r = nbs_read_string_raw_ex(fp, &song->original_author, out_error);
         if (r != NBS_READ_OK) {
             if (r == NBS_READ_LIMIT) {
-                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else if (r == NBS_READ_NOMEM) {
-                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             }
             return false;
         }
@@ -206,11 +208,11 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         enum nbs_read_result r = nbs_read_string_raw_ex(fp, &song->description, out_error);
         if (r != NBS_READ_OK) {
             if (r == NBS_READ_LIMIT) {
-                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else if (r == NBS_READ_NOMEM) {
-                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             }
             return false;
         }
@@ -218,56 +220,56 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
 
     offset = get_offset(fp);
     if (fread(&tempo, sizeof(ushort), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
     song->tempo = (float)tempo / 100.0f;
 
     offset = get_offset(fp);
     if (fread(&song->auto_save, sizeof(uchar), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->auto_save_duration, sizeof(uchar), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->time_signature, sizeof(uchar), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->minutes_spent, sizeof(uint), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->left_clicks, sizeof(uint), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->right_clicks, sizeof(uint), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->blocks_added, sizeof(uint), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
     offset = get_offset(fp);
     if (fread(&song->blocks_removed, sizeof(uint), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
         return false;
     }
 
@@ -276,11 +278,11 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         enum nbs_read_result r = nbs_read_string_raw_ex(fp, &song->song_origin, out_error);
         if (r != NBS_READ_OK) {
             if (r == NBS_READ_LIMIT) {
-                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else if (r == NBS_READ_NOMEM) {
-                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_HEADER, offset, 0, 0, 0);
             } else {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             }
             return false;
         }
@@ -290,7 +292,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     offset = get_offset(fp);
     if (song->version >= 4) {
         if (fread(&song->loop, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -300,7 +302,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     offset = get_offset(fp);
     if (song->version >= 4) {
         if (fread(&song->max_loop_count, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -310,7 +312,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     offset = get_offset(fp);
     if (song->version >= 4) {
         if (fread(&song->loop_start, sizeof(ushort), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_HEADER, offset, 0, 0, 0);
             return false;
         }
     } else {
@@ -335,7 +337,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
         if (fread(&jump, sizeof(ushort), 1, fp) != 1) {
             set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                       (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                      (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                      (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                      0);
             return false;
         }
         if (!jump) break;  /* Normal end of notes section */
@@ -344,7 +347,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
         if ((uint64_t)jump > UINT32_MAX - (uint64_t)current_tick - 1) {
             set_error(out_error, NBS_ERROR_INTEGER_OVERFLOW, NBS_SECTION_NOTES, offset,
                       (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                      (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                      (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                      0);
             return false;
         }
         current_tick += jump;
@@ -357,7 +361,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
             if (fread(&jump, sizeof(ushort), 1, fp) != 1) {
                 set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                           (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                          (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                          (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                          0);
                 return false;
             }
             if (!jump) break;  /* End of layers for this tick */
@@ -366,7 +371,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
             if ((uint64_t)jump > UINT16_MAX - (uint64_t)current_layer - 1) {
                 set_error(out_error, NBS_ERROR_INTEGER_OVERFLOW, NBS_SECTION_NOTES, offset,
                           (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                          (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                          (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                          0);
                 return false;
             }
             current_layer += jump;
@@ -375,7 +381,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
             if (arrlen(song->notes) >= NBS_MAX_NOTES) {
                 set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_NOTES, offset,
                           (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                          (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                          (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                          0);
                 return false;
             }
 
@@ -388,7 +395,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
             if (fread(&note.instrument, sizeof(uchar), 1, fp) != 1) {
                 set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                           (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                          (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                          (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                          0);
                 return false;
             }
 
@@ -396,7 +404,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
             if (fread(&note.key, sizeof(uchar), 1, fp) != 1) {
                 set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                           (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                          (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                          (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                          0);
                 return false;
             }
 
@@ -405,7 +414,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
                 if (fread(&note.velocity, sizeof(uchar), 1, fp) != 1) {
                     set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                               (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                              (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                              (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                              0);
                     return false;
                 }
             } else {
@@ -418,7 +428,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
                 if (fread(&panning_raw, sizeof(uchar), 1, fp) != 1) {
                     set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                               (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                              (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                              (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                              0);
                     return false;
                 }
                 /* Map 0-200 to -100-100 */
@@ -432,7 +443,8 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
                 if (fread(&note.pitch, sizeof(short), 1, fp) != 1) {
                     set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_NOTES, offset,
                               (uint32_t)(current_tick < 0 ? 0 : current_tick),
-                              (uint32_t)(current_layer < 0 ? 0 : current_layer));
+                              (uint32_t)(current_layer < 0 ? 0 : current_layer),
+                              0);
                     return false;
                 }
             } else {
@@ -463,12 +475,13 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
             enum nbs_read_result r = nbs_read_string_raw_ex(fp, &layer.name, out_error);
             if (r != NBS_READ_OK) {
                 if (r == NBS_READ_LIMIT) {
-                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
                 } else if (r == NBS_READ_NOMEM) {
-                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
                 } else {
-                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
                 }
+                free(layer.name);
                 return false;
             }
         }
@@ -477,7 +490,8 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         if (song->version >= 4) {
             uchar lock = 0;
             if (fread(&lock, sizeof(uchar), 1, fp) != 1) {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
+                free(layer.name);
                 return false;
             }
             layer.lock = (bool)lock;
@@ -487,7 +501,8 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
 
         offset = get_offset(fp);
         if (fread(&layer.volume, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
+            free(layer.name);
             return false;
         }
 
@@ -495,7 +510,8 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
         if (song->version >= 2) {
             uchar panning_raw;
             if (fread(&panning_raw, sizeof(uchar), 1, fp) != 1) {
-                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i);
+                set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_LAYERS, offset, 0, (uint32_t)i, 0);
+                free(layer.name);
                 return false;
             }
             /* Map 0-200 to -100-100 */
@@ -510,21 +526,28 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
     return true;
 }
 
-/* Parse instruments section with full error checking */
+/* Parse instruments section with full error checking.
+ * This section is optional for older NBS versions. If instrument count cannot be read
+ * at all, treat as clean EOF (no instruments). But if count is read and data is
+ * incomplete, report truncation.
+ */
 static bool parse_instruments(FILE *fp, struct nbs_song *song, struct nbs_error_info *out_error)
 {
     song->instruments = nullptr;
 
     uchar instrument_count = 0;
     int64_t offset = get_offset(fp);
-    if (fread(&instrument_count, sizeof(uchar), 1, fp) != 1) {
-        set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, 0);
-        return false;
+    size_t bytes_read = fread(&instrument_count, sizeof(uchar), 1, fp);
+
+    /* If we can't read the count byte at all, treat as clean EOF (optional section omitted) */
+    if (bytes_read != 1) {
+        /* No instruments section - this is allowed */
+        return true;
     }
 
     /* Validate against format limit (uint8_t field) and resource limit */
     if (instrument_count > NBS_MAX_INSTRUMENTS) {
-        set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, 0);
+        set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, 0, 0);
         return false;
     }
 
@@ -540,12 +563,13 @@ static bool parse_instruments(FILE *fp, struct nbs_song *song, struct nbs_error_
             enum nbs_read_result r = nbs_read_string_raw_ex(fp, &instr.name, out_error);
             if (r != NBS_READ_OK) {
                 if (r == NBS_READ_LIMIT) {
-                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 } else if (r == NBS_READ_NOMEM) {
-                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 } else {
-                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 }
+                free(instr.name);
                 return false;
             }
         }
@@ -555,26 +579,32 @@ static bool parse_instruments(FILE *fp, struct nbs_song *song, struct nbs_error_
             enum nbs_read_result r = nbs_read_string_raw_ex(fp, &instr.sound_file, out_error);
             if (r != NBS_READ_OK) {
                 if (r == NBS_READ_LIMIT) {
-                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_LIMIT_EXCEEDED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 } else if (r == NBS_READ_NOMEM) {
-                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 } else {
-                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+                    set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
                 }
+                free(instr.name);
+                free(instr.sound_file);
                 return false;
             }
         }
 
         offset = get_offset(fp);
         if (fread(&instr.pitch, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
+            free(instr.name);
+            free(instr.sound_file);
             return false;
         }
 
         offset = get_offset(fp);
         uchar press_key = 0;
         if (fread(&press_key, sizeof(uchar), 1, fp) != 1) {
-            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i);
+            set_error(out_error, NBS_ERROR_TRUNCATED, NBS_SECTION_INSTRUMENTS, offset, 0, (uint32_t)i, 0);
+            free(instr.name);
+            free(instr.sound_file);
             return false;
         }
         instr.press_key = (bool)press_key;
@@ -587,12 +617,51 @@ static bool parse_instruments(FILE *fp, struct nbs_song *song, struct nbs_error_
 
 struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error)
 {
-    /* Initialize error info on entry */
-    memset(out_error, 0, sizeof(struct nbs_error_info));
+    /* Initialize error info on entry (safe if out_error == NULL) */
+    if (out_error) {
+        *out_error = (struct nbs_error_info){0};
+    }
+
+    /* Validate input argument */
+    if (!fp) {
+        if (out_error) {
+            out_error->code = NBS_ERROR_INVALID_ARGUMENT;
+            out_error->section = NBS_SECTION_NONE;
+        }
+        return nullptr;
+    }
+
+    /* Check file size before parsing to prevent excessive memory allocation */
+    int64_t current_pos = get_offset(fp);
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        if (out_error) {
+            out_error->code = NBS_ERROR_IO;
+            out_error->section = NBS_SECTION_NONE;
+        }
+        return nullptr;
+    }
+    int64_t file_size = get_offset(fp);
+    if (file_size < 0 || (uint64_t)file_size > NBS_MAX_FILE_SIZE) {
+        fseek(fp, (long)current_pos, SEEK_SET);
+        if (out_error) {
+            out_error->code = NBS_ERROR_LIMIT_EXCEEDED;
+            out_error->section = NBS_SECTION_NONE;
+            out_error->file_offset = file_size < 0 ? -1 : file_size;
+        }
+        return nullptr;
+    }
+    /* Restore original position */
+    if (fseek(fp, (long)current_pos, SEEK_SET) != 0) {
+        if (out_error) {
+            out_error->code = NBS_ERROR_IO;
+            out_error->section = NBS_SECTION_NONE;
+        }
+        return nullptr;
+    }
 
     struct nbs_song *song = (struct nbs_song *)calloc(1, sizeof(struct nbs_song));
     if (!song) {
-        set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_NONE, 0, 0, 0);
+        set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_NONE, 0, 0, 0, 0);
         return nullptr;
     }
 
