@@ -297,14 +297,15 @@ static void handle_mpm(void *self, void *sender, int argc, const char *argv[])
             break;
         case ENQUEUE_NBS_VERSION_ERROR:
             snprintf(msg, sizeof(msg),
-                     MC_RED "[MediaPlayer] " MC_GRAY "Unsupported NBS version " MC_YELLOW "%s",
-                     files[idx]);
+                     MC_RED "[MediaPlayer] " MC_GRAY "Unsupported NBS version " MC_YELLOW "%u"
+                     MC_GRAY " in " MC_YELLOW "%s",
+                     (unsigned int)err.actual_version, files[idx]);
             sender_send_message(sender, msg);
             if (self) {
                 char logmsg[512];
                 snprintf(logmsg, sizeof(logmsg),
                     "[MediaPlayer] Unsupported NBS version in '%s': version=%d",
-                    files[idx], (int)err.tick);
+                    files[idx], (int)err.actual_version);
                 PLUGIN_LOG(self, ES_LOG_INFO, logmsg);
             }
             break;
