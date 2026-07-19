@@ -53,7 +53,7 @@ static void *g_vtable[ES_VTABLE_SLOT_COUNT] = {
 #define DESC_STRING(desc, off, value) \
     cpp_string_construct((desc) + (off), (value))
 #define DESC_VECTOR(desc, off, esize) \
-    cpp_vector_construct((desc) + (off), (esize), nullptr)
+    cpp_vector_construct((desc) + (off), (esize), NULL)
 
 static void description_init(char *desc)
 {
@@ -103,7 +103,7 @@ static void description_destroy(char *desc)
  *  Global plugin pointer (used by endstone_api.c for BossBar)
  * ===================================================================== */
 
-void *g_plugin = nullptr;
+void *g_plugin = NULL;
 
 /* =====================================================================
  *  Command class
@@ -111,7 +111,7 @@ void *g_plugin = nullptr;
 
 static void  cmd_dtor(void *self, int f)        { (void)self; (void)f; }
 static bool  cmd_exec(void *s, void *nd, const void *a) { (void)s;(void)nd;(void)a; return false; }
-static void *cmd_as_pcmd(void *self)             { (void)self; return nullptr; }
+static void *cmd_as_pcmd(void *self)             { (void)self; return NULL; }
 
 #if ES_PLATFORM_LINUX
 static void cmd_complete_dtor(void *self) { cmd_dtor(self, 0); }
@@ -205,13 +205,13 @@ static void handle_mpm(void *self, void *sender, int argc, const char *argv[])
 
     /* ── list (works from console) ── */
     if (strcmp(action, "list") == 0) {
-        char **files = nullptr;
+        char **files = NULL;
         int count = list_nbs_files(path_nbs(), &files);
         if (count == 0) {
             sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No .nbs files in data folder");
             return;
         }
-        const char *filter = (argc >= 2) ? argv[1] : nullptr;
+        const char *filter = (argc >= 2) ? argv[1] : NULL;
         int matched = 0;
         for (int i = 0; i < count; i++) {
             if (filter && !strstr(files[i], filter)) continue;
@@ -253,7 +253,7 @@ static void handle_mpm(void *self, void *sender, int argc, const char *argv[])
             return;
         }
 
-        char **files = nullptr;
+        char **files = NULL;
         int count = list_nbs_files(path_nbs(), &files);
         if (count == 0) {
             sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "No .nbs files in data folder");
@@ -591,7 +591,7 @@ _Alignas(8) static char g_mpm_usages[9][ES_STRING_SIZE];
 ES_EXPORT void *init_endstone_plugin(void)
 {
     char *obj = (char *)calloc(1, ES_PLUGIN_IMPL_SIZE);
-    if (!obj) return nullptr;
+    if (!obj) return NULL;
 
     *(void **)obj = g_vtable;
     description_init((char *)obj + ES_PLUGIN_OFF_DESCRIPTION);

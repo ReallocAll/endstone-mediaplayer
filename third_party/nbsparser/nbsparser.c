@@ -45,7 +45,7 @@ static int64_t get_offset(FILE *fp)
  *   NBS_READ_NOMEM  — malloc failed
  *
  * On NBS_READ_OK: *out_string points to allocated string (caller must free)
- * On error: *out_string = nullptr, error code indicates cause
+ * On error: *out_string = NULL, error code indicates cause
  */
 static enum nbs_read_result nbs_read_string_raw_ex(
     FILE *fp,
@@ -54,13 +54,13 @@ static enum nbs_read_result nbs_read_string_raw_ex(
 {
     uint str_len_u32;
     if (fread(&str_len_u32, sizeof(uint), 1, fp) != 1) {
-        *out_string = nullptr;
+        *out_string = NULL;
         return NBS_READ_EOF;
     }
 
     /* Validate string length against resource limit */
     if (str_len_u32 > NBS_MAX_STRING_LEN) {
-        *out_string = nullptr;
+        *out_string = NULL;
         return NBS_READ_LIMIT;
     }
 
@@ -70,7 +70,7 @@ static enum nbs_read_result nbs_read_string_raw_ex(
 
     char *buffer = (char *)malloc(alloc_size);
     if (!buffer) {
-        *out_string = nullptr;
+        *out_string = NULL;
         return NBS_READ_NOMEM;
     }
 
@@ -78,7 +78,7 @@ static enum nbs_read_result nbs_read_string_raw_ex(
         size_t read_count = fread(buffer, sizeof(char), str_len, fp);
         if (read_count != str_len) {
             free(buffer);
-            *out_string = nullptr;
+            *out_string = NULL;
             return NBS_READ_EOF;
         }
     }
@@ -88,7 +88,7 @@ static enum nbs_read_result nbs_read_string_raw_ex(
 }
 
 /* Legacy wrapper for backward compatibility.
- * Returns nullptr on any failure; caller must check context for error type.
+ * Returns NULL on any failure; caller must check context for error type.
  */
 static char *nbs_read_string_raw(FILE *fp, struct nbs_error_info *out_error)
 {
@@ -327,7 +327,7 @@ static bool parse_header(FILE *fp, struct nbs_song *song, struct nbs_error_info 
  */
 static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *out_error)
 {
-    song->notes = nullptr;
+    song->notes = NULL;
     int64_t current_tick = -1;
     int64_t current_layer = -1;
     ushort jump;
@@ -461,7 +461,7 @@ static bool parse_notes(FILE *fp, struct nbs_song *song, struct nbs_error_info *
 /* Parse layers section with full error checking */
 static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info *out_error)
 {
-    song->layers = nullptr;
+    song->layers = NULL;
 
     for (int i = 0; i < song->song_layers; i++) {
         int64_t offset = get_offset(fp);
@@ -533,7 +533,7 @@ static bool parse_layers(FILE *fp, struct nbs_song *song, struct nbs_error_info 
  */
 static bool parse_instruments(FILE *fp, struct nbs_song *song, struct nbs_error_info *out_error)
 {
-    song->instruments = nullptr;
+    song->instruments = NULL;
 
     uchar instrument_count = 0;
     int64_t offset = get_offset(fp);
@@ -628,7 +628,7 @@ struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error)
             out_error->code = NBS_ERROR_INVALID_ARGUMENT;
             out_error->section = NBS_SECTION_NONE;
         }
-        return nullptr;
+        return NULL;
     }
 
     /* Check file size before parsing to prevent excessive memory allocation */
@@ -638,7 +638,7 @@ struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error)
             out_error->code = NBS_ERROR_IO;
             out_error->section = NBS_SECTION_NONE;
         }
-        return nullptr;
+        return NULL;
     }
     int64_t file_size = get_offset(fp);
     if (file_size < 0 || (uint64_t)file_size > NBS_MAX_FILE_SIZE) {
@@ -648,7 +648,7 @@ struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error)
             out_error->section = NBS_SECTION_NONE;
             out_error->file_offset = file_size < 0 ? -1 : file_size;
         }
-        return nullptr;
+        return NULL;
     }
     /* Restore original position */
     if (fseek(fp, (long)current_pos, SEEK_SET) != 0) {
@@ -656,37 +656,37 @@ struct nbs_song *nbs_parse(FILE *fp, struct nbs_error_info *out_error)
             out_error->code = NBS_ERROR_IO;
             out_error->section = NBS_SECTION_NONE;
         }
-        return nullptr;
+        return NULL;
     }
 
     struct nbs_song *song = (struct nbs_song *)calloc(1, sizeof(struct nbs_song));
     if (!song) {
         set_error(out_error, NBS_ERROR_OUT_OF_MEMORY, NBS_SECTION_NONE, 0, 0, 0, 0);
-        return nullptr;
+        return NULL;
     }
 
     /* Parse header first */
     if (!parse_header(fp, song, out_error)) {
         nbs_free(song);
-        return nullptr;
+        return NULL;
     }
 
     /* Parse notes section */
     if (!parse_notes(fp, song, out_error)) {
         nbs_free(song);
-        return nullptr;
+        return NULL;
     }
 
     /* Parse layers section */
     if (!parse_layers(fp, song, out_error)) {
         nbs_free(song);
-        return nullptr;
+        return NULL;
     }
 
     /* Parse instruments section */
     if (!parse_instruments(fp, song, out_error)) {
         nbs_free(song);
-        return nullptr;
+        return NULL;
     }
 
     return song;

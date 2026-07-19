@@ -28,8 +28,8 @@ void path_init(const char *data_folder)
     snprintf(s_data, MAX_PATH_LEN, "%s", data_folder);
     snprintf(s_nbs, MAX_PATH_LEN, "%s/nbs", s_data);
 #ifdef _WIN32
-    CreateDirectoryA(s_data, nullptr);
-    CreateDirectoryA(s_nbs, nullptr);
+    CreateDirectoryA(s_data, NULL);
+    CreateDirectoryA(s_nbs, NULL);
 #else
     mkdir(s_data, 0755);
     mkdir(s_nbs, 0755);
@@ -42,7 +42,7 @@ const char *path_nbs(void)  { return s_nbs; }
 // --- Directory listing (UTF-8 on Windows) ---
 int list_nbs_files(const char *dir, char ***out_names)
 {
-    *out_names = nullptr;
+    *out_names = NULL;
     int count = 0;
 #ifdef _WIN32
     wchar_t wdir[MAX_PATH_LEN];
@@ -58,7 +58,7 @@ int list_nbs_files(const char *dir, char ***out_names)
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
             char utf8_name[512];
             WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1,
-                                utf8_name, sizeof(utf8_name), nullptr, nullptr);
+                                utf8_name, sizeof(utf8_name), NULL, NULL);
             char *name = _strdup(utf8_name);
             arrput(*out_names, name);
             count++;
@@ -69,7 +69,7 @@ int list_nbs_files(const char *dir, char ***out_names)
     DIR *d = opendir(dir);
     if (!d) return 0;
     struct dirent *ent;
-    while ((ent = readdir(d)) != nullptr) {
+    while ((ent = readdir(d)) != NULL) {
         size_t len = strlen(ent->d_name);
         if (len > 4 && strcmp(ent->d_name + len - 4, ".nbs") == 0) {
             char *name = strdup(ent->d_name);
@@ -119,7 +119,7 @@ static void cleanup_playlist_bossbars(struct player_music *pm)
     for (int i = 0; i < len; i++) {
         if (pm->playlist[i].boss_bar) {
             boss_bar_destroy(pm->playlist[i].boss_bar);
-            pm->playlist[i].boss_bar = nullptr;
+            pm->playlist[i].boss_bar = NULL;
         }
     }
 }
@@ -167,7 +167,7 @@ long long song_cache_parse(FILE *fp, const char *song_name, struct nbs_error_inf
     struct song_cache_entry entry;
     memset(&entry, 0, sizeof(entry));
     strncpy(entry.song_name, song_name, sizeof(entry.song_name) - 1);
-    entry.notes = nullptr;
+    entry.notes = NULL;
 
     float time_per_tick = 20.0f / nbs->tempo * 50.0f;
     int note_count = (int)arrlen(nbs->notes);
@@ -176,7 +176,7 @@ long long song_cache_parse(FILE *fp, const char *song_name, struct nbs_error_inf
 
     for (int i = 0; i < note_count; i++) {
         struct nbs_note *nn = &nbs->notes[i];
-        struct nbs_layer *layer = (nn->layer < (size_t)layer_count) ? &nbs->layers[nn->layer] : nullptr;
+        struct nbs_layer *layer = (nn->layer < (size_t)layer_count) ? &nbs->layers[nn->layer] : NULL;
 
         /* Custom instrument handling: reject instruments > 15, use harp (index 0) */
         int instrument = (nn->instrument < NUM_INSTRUMENTS) ? nn->instrument : 0;
@@ -293,14 +293,14 @@ enum enqueue_result player_music_enqueue(void *player, const char *nbs_file,
     entry.start_ms = 0;
     entry.loop = loop;
     entry.bar_type = bar;
-    entry.boss_bar = nullptr;
+    entry.boss_bar = NULL;
 
     long long pos = player_music_find(player);
     if (pos == -1) {
         struct player_music pm;
         memset(&pm, 0, sizeof(pm));
         pm.player = player;
-        pm.playlist = nullptr;
+        pm.playlist = NULL;
         pm.paused = false;
         pm.current_track = 0;
         arrput(pm.playlist, entry);
@@ -322,7 +322,7 @@ enum player_op_result player_music_dequeue(void *player, size_t index)
     // Clean up boss bar for the entry being removed
     if (pm->playlist[index].boss_bar) {
         boss_bar_destroy(pm->playlist[index].boss_bar);
-        pm->playlist[index].boss_bar = nullptr;
+        pm->playlist[index].boss_bar = NULL;
     }
 
     if (index == pm->current_track) {
@@ -475,7 +475,7 @@ void music_player_tick(void)
             // Clean up boss bar when track ends
             if (entry->boss_bar) {
                 boss_bar_destroy(entry->boss_bar);
-                entry->boss_bar = nullptr;
+                entry->boss_bar = NULL;
             }
 
             if (entry->loop > 1) {
