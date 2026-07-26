@@ -42,11 +42,14 @@ jobs:
       - name: Install LLVM and Ninja
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld ninja-build
+          sudo apt-get install -y wget ninja-build
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 20
 
       - name: Build
         run: |
-          cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build
+          cmake -G Ninja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo -S . -B build
           cmake --build build --parallel
 
       - name: Run tests
@@ -69,12 +72,15 @@ jobs:
       - name: Install LLVM and Ninja
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang lld ninja-build
+          sudo apt-get install -y wget ninja-build
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 20
 
       - name: Build with sanitizers
         run: |
           cmake -G Ninja \
-            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_C_COMPILER=clang-20 \
             -DCMAKE_BUILD_TYPE=Debug \
             -DENABLE_SANITIZER=ON \
             -S . -B build-sanitized

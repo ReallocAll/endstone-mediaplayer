@@ -18,6 +18,10 @@ if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
     message(FATAL_ERROR "MediaPlayer requires Clang")
 endif()
 
+if(CMAKE_C_COMPILER_VERSION VERSION_LESS 16)
+    message(FATAL_ERROR "MediaPlayer requires Clang 16 or newer for C23")
+endif()
+
 if(WIN32)
     if(NOT CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         message(FATAL_ERROR "Windows builds require clang-cl")
@@ -29,7 +33,10 @@ endif()
 set(MP_SOURCES
     src/plugin.c
     src/endstone_api.c
-    src/music_player.c
+    src/music/music_catalog.c
+    src/music/music_cache.c
+    src/music/music_session.c
+    src/music/music_commands.c
     src/sfunc.c
     third_party/cppcompat/src/common/alloc.c
     third_party/nbsparser/nbsparser.c

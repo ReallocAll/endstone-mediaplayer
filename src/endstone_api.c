@@ -1,5 +1,5 @@
 #include "abi_helpers.h"
-#include "music_player.h"
+#include "mediaplayer/endstone_api.h"
 #include <cppcompat/string.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,9 +14,10 @@ extern void *g_plugin;
 FILE *fopen_utf8(const char *path, const char *mode)
 {
 #if ES_PLATFORM_WINDOWS
-    wchar_t wide_path[MAX_PATH_LEN];
+    wchar_t wide_path[ENDSTONE_MEDIAPLAYER_PATH_MAX];
     wchar_t wide_mode[8];
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide_path, MAX_PATH_LEN);
+    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide_path,
+                        ENDSTONE_MEDIAPLAYER_PATH_MAX);
     MultiByteToWideChar(CP_UTF8, 0, mode, -1, wide_mode, 8);
     return _wfopen(wide_path, wide_mode);
 #else
