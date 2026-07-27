@@ -94,3 +94,9 @@ const char *cpp_string_str(const void *s)
         ? obj
         : *(const char *const *)obj;
 }
+
+size_t cpp_string_size(const void *s)
+{
+    if (!s) return 0;
+    return *(const size_t *)((const char *)s + 16);
+}
