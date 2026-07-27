@@ -24,6 +24,12 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure
 
+      - name: Test debug command build
+        run: |
+          cmake -G Ninja -DCMAKE_C_COMPILER=clang-cl -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_MPV_DEBUG_COMMANDS=ON -S . -B build-debug-commands
+          cmake --build build-debug-commands --parallel
+          ctest --test-dir build-debug-commands --output-on-failure
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -55,6 +61,12 @@ jobs:
       - name: Run tests
         run: |
           ctest --test-dir build --output-on-failure
+
+      - name: Test debug command build
+        run: |
+          cmake -G Ninja -DCMAKE_C_COMPILER=clang-20 -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_MPV_DEBUG_COMMANDS=ON -S . -B build-debug-commands
+          cmake --build build-debug-commands --parallel
+          ctest --test-dir build-debug-commands --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
