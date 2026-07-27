@@ -27,7 +27,7 @@ on:
         default: false
         type: boolean
       rel_tag:
-        description: 'Release tag (e.g. 2.1.0)'
+        description: 'Release tag (e.g. 2.2.0)'
         required: false
         default: ''
         type: string
