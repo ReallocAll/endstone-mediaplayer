@@ -54,7 +54,7 @@ plugins/
 
 ### Map video (`/mpv`)
 
-All `/mpv` commands require operator status when run by a player. The server console passes the central permission check, although world operations such as screen creation and managed-screen deletion still require an in-game player in the relevant dimension.
+Screen-control `/mpv` commands require operator status. Every player can use `/mpv help` and `/mpv watch [on|off]`; the server console passes the central permission check, although world operations such as screen creation and managed-screen deletion still require an in-game player in the relevant dimension.
 
 | Command | Description |
 | --- | --- |
@@ -69,8 +69,11 @@ All `/mpv` commands require operator status when run by a player. The server con
 | `/mpv resume <screen>` | Resume playback |
 | `/mpv stop <screen>` | Stop playback |
 | `/mpv status <screen>` | Show playback status |
+| `/mpv watch [on\|off]` | Show or change whether this player receives public screen video and music |
 
-Screens use a fixed public viewer model. Any online player—OP or not—with a valid snapshot in the same dimension and no more than 64 blocks from the geometric screen center receives video automatically.
+Screens use a fixed public viewer model. Any online player—OP or not—with a valid snapshot in the same dimension and no more than 16 blocks from the geometric screen center receives video and screen music automatically, unless they disable both with `/mpv watch off`.
+
+When a video has an exactly matching `.nbs` base name, the plugin plays it as the screen soundtrack. The video is the master clock: pausing or stopping affects both, every video loop restarts the NBS, and music remaining after the video ends is stopped. A missing or invalid matching NBS does not prevent silent video playback.
 
 To create a screen, stand in the air immediately in front of a rectangular solid backing wall no larger than 7×4 and run `/mpv create <name>`. The plugin discovers the wall and facing, validates every tile, places empty item frames, and gives the creator labeled maps. Install the maps manually from left to right and top to bottom using their row/column labels.
 
