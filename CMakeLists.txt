@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(endstone_mediaplayer LANGUAGES C)
 
-set(MP_VERSION "2.2.0" CACHE STRING "MediaPlayer plugin version")
+set(MP_VERSION "2.2.1" CACHE STRING "MediaPlayer plugin version")
 option(ENABLE_MPV_DEBUG_COMMANDS "Expose /mpv debug diagnostics" OFF)
 
 set(CMAKE_C_STANDARD 23)
