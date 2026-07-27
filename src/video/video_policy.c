@@ -14,21 +14,25 @@ const char *const mpv_command_usages[MPV_COMMAND_USAGE_COUNT] = {
     "/mpv (resume)<a: MpvResume> <name: string>",
     "/mpv (stop)<a: MpvStop> <name: string>",
     "/mpv (status)<a: MpvStatus> <name: string>",
+    "/mpv (watch)<a: MpvWatch> [state: string]",
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
     "/mpv (debug)<a: MpvDebug> <mode: string> [screen: string] [value: string]",
 #endif
 };
 
-bool mpv_command_allowed(bool is_player, bool is_op)
+bool mpv_command_allowed(bool is_player, bool is_op, const char *action)
 {
-    return !is_player || is_op;
+    if (!is_player || is_op)
+        return true;
+    return !action || !action[0] || strcmp(action, "help") == 0 ||
+           strcmp(action, "watch") == 0;
 }
 
 bool mpv_command_action_registered(const char *action)
 {
     static const char *const actions[] = {
         "help", "screens", "list", "create", "delete", "info",
-        "play", "pause", "resume", "stop", "status",
+        "play", "pause", "resume", "stop", "status", "watch",
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
         "debug",
 #endif
@@ -79,7 +83,7 @@ int mpv_collect_public_viewers(const struct screen_geom *screen,
     int count = 0;
     for (int i = 0; i < candidate_count && count < capacity; i++) {
         const struct mpv_public_candidate *candidate = &candidates[i];
-        if (!candidate->player ||
+        if (!candidate->player || !candidate->public_media_enabled ||
             !mpv_public_viewer_eligible(candidate->online,
                                         &candidate->snapshot, screen)) {
             continue;

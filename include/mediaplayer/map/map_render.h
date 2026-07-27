@@ -77,6 +77,10 @@ int map_render_resend(struct map_render_ctx *ctx,
                       void **players, const char **player_ids,
                       int player_count);
 
+int map_render_hide_viewer(struct map_render_ctx *ctx,
+                           const struct screen_entry *screen,
+                           void *player, const char *player_id);
+
 bool map_render_get_stats(const struct screen_entry *screen, int tile,
                           struct map_renderer_stats *stats);
 

@@ -651,6 +651,58 @@ int map_render_resend(struct map_render_ctx *ctx,
 #endif
 }
 
+int map_render_hide_viewer(struct map_render_ctx *ctx,
+                           const struct screen_entry *screen,
+                           void *player, const char *player_id)
+{
+    (void)ctx;
+#if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
+    if (!screen || !screen->tiles_initialized || !player)
+        return -1;
+
+    int pixel_width = screen_geom_pixel_width(&screen->geom);
+    int pixel_height = screen_geom_pixel_height(&screen->geom);
+    size_t frame_size =
+        (size_t)pixel_width * (size_t)pixel_height * sizeof(uint32_t);
+    uint8_t *black = calloc(1, frame_size);
+    if (!black)
+        return -1;
+
+    int tile_count = screen_geom_tile_count(&screen->geom);
+    const uint8_t *frames[SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {0};
+    enum map_test_pattern patterns[
+        SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {0};
+    for (int i = 0; i < tile_count; i++) {
+        struct renderer_alloc *allocation = screen->tiles[i].renderer;
+        if (!allocation)
+            continue;
+        frames[i] = allocation->renderer.frame_ptr;
+        patterns[i] = allocation->renderer.pattern;
+        allocation->renderer.frame_ptr = black;
+        allocation->renderer.pattern = MAP_TEST_NONE;
+    }
+
+    void *players[] = {player};
+    const char *player_ids[] = {player_id};
+    send_tiles(screen, players, player_ids, 1, nullptr);
+
+    for (int i = 0; i < tile_count; i++) {
+        struct renderer_alloc *allocation = screen->tiles[i].renderer;
+        if (!allocation)
+            continue;
+        allocation->renderer.frame_ptr = frames[i];
+        allocation->renderer.pattern = patterns[i];
+    }
+    free(black);
+    return 0;
+#else
+    (void)screen;
+    (void)player;
+    (void)player_id;
+    return -2;
+#endif
+}
+
 bool map_render_get_stats(const struct screen_entry *screen, int tile,
                           struct map_renderer_stats *stats)
 {

@@ -5,14 +5,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define MPV_PUBLIC_VIEW_DISTANCE 64.0
+#define MPV_PUBLIC_VIEW_DISTANCE 16.0
 #define MPV_PUBLIC_VIEW_DISTANCE_SQUARED \
     (MPV_PUBLIC_VIEW_DISTANCE * MPV_PUBLIC_VIEW_DISTANCE)
 #define MPV_PUBLIC_VIEWER_REFRESH_TICKS 20
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
-#define MPV_COMMAND_USAGE_COUNT 13
+#define MPV_COMMAND_USAGE_COUNT 14
 #else
-#define MPV_COMMAND_USAGE_COUNT 12
+#define MPV_COMMAND_USAGE_COUNT 13
 #endif
 
 struct mpv_public_snapshot {
@@ -33,6 +33,7 @@ struct mpv_public_candidate {
     void *player;
     const char *uuid;
     bool online;
+    bool public_media_enabled;
     struct mpv_public_snapshot snapshot;
 };
 
@@ -50,7 +51,7 @@ enum mpv_membership_transition {
 
 extern const char *const mpv_command_usages[MPV_COMMAND_USAGE_COUNT];
 
-bool mpv_command_allowed(bool is_player, bool is_op);
+bool mpv_command_allowed(bool is_player, bool is_op, const char *action);
 bool mpv_command_action_registered(const char *action);
 
 struct mpv_screen_center mpv_screen_center(const struct screen_geom *screen);

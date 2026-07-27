@@ -16,7 +16,10 @@
 #include "mediaplayer/video/video_args.h"
 #include "mediaplayer/video/video_format.h"
 #include "mediaplayer/video/video_policy.h"
+#include "mediaplayer/video/video_preferences.h"
 #include "mediaplayer/video/video_session.h"
+#include "mediaplayer/music/music_cache.h"
+#include "mediaplayer/music/screen_audio.h"
 #include "mediaplayer/map/map_render.h"
 #include "mediaplayer/bedrock/map_abi.h"
 #include "mediaplayer/bedrock/world_bridge.h"
@@ -25,6 +28,26 @@
 #include "endstone_abi.h"
 #include <cppcompat/string.h>
 #include "miniz.h"
+#include <stb_ds.h>
+
+static int g_sound_count;
+static void *g_last_sound_player;
+static char g_last_sound[64];
+
+FILE *fopen_utf8(const char *path, const char *mode)
+{
+    return fopen(path, mode);
+}
+
+void player_play_sound(void *player, const char *sound,
+                       float volume, float pitch)
+{
+    (void)volume;
+    (void)pitch;
+    g_sound_count++;
+    g_last_sound_player = player;
+    snprintf(g_last_sound, sizeof(g_last_sound), "%s", sound);
+}
 
 /* --- Minimal test framework (same style as test_nbs_parser.c) --- */
 static int g_pass = 0, g_fail = 0;
@@ -2171,21 +2194,128 @@ static int test_persistence_invalid_dimensions(void)
     return 1;
 }
 
+static int test_preferences_roundtrip(void)
+{
+    const char *path = fixture("test_preferences.json");
+    struct mpv_preferences preferences;
+    mpv_preferences_init(&preferences);
+    EXPECT(mpv_preferences_enabled(&preferences, "player-a"),
+           "players default to public media enabled");
+    EXPECT(mpv_preferences_set_enabled(&preferences, "player-a", false),
+           "player can disable public media");
+    EXPECT(!mpv_preferences_enabled(&preferences, "player-a"),
+           "disabled preference is visible immediately");
+    EXPECT(mpv_preferences_save(&preferences, path) == 0,
+           "preferences save succeeds");
+
+    struct mpv_preferences loaded;
+    EXPECT(mpv_preferences_load(&loaded, path) == 0,
+           "preferences load succeeds");
+    EXPECT(!mpv_preferences_enabled(&loaded, "player-a") &&
+               mpv_preferences_enabled(&loaded, "player-b"),
+           "only explicit opt-outs persist");
+    EXPECT(mpv_preferences_set_enabled(&loaded, "player-a", true),
+           "player can re-enable public media");
+    EXPECT(mpv_preferences_enabled(&loaded, "player-a"),
+           "re-enabled player is removed from opt-outs");
+    remove(path);
+    return 1;
+}
+
+static int test_screen_audio_video_clock(void)
+{
+    struct music_cache cache;
+    music_cache_init(&cache);
+    struct music_cache_entry song = {0};
+    snprintf(song.song_name, sizeof(song.song_name), "demo");
+    arrput(song.notes, ((struct music_note){
+        .time_ms = 0, .instrument = 0, .volume = 1.0f, .pitch = 1.0f}));
+    arrput(song.notes, ((struct music_note){
+        .time_ms = 50, .instrument = 1, .volume = 0.5f, .pitch = 1.2f}));
+    arrput(song.notes, ((struct music_note){
+        .time_ms = 900, .instrument = 2, .volume = 0.7f, .pitch = 0.8f}));
+    arrput(cache.entries, song);
+
+    struct screen_audio_engine engine;
+    screen_audio_engine_init(&engine);
+    struct screen_audio_session *session = &engine.sessions[0];
+    session->active = true;
+    session->screen_runtime_id = 42;
+    session->song_index = 0;
+    session->loop_current = 1;
+
+    int player_a, player_b;
+    void *players[] = {&player_a, &player_b};
+    g_sound_count = 0;
+    g_last_sound_player = nullptr;
+    g_last_sound[0] = '\0';
+
+    screen_audio_tick(session, &cache, 1, 0, false, players, 2);
+    EXPECT(g_sound_count == 2 && strcmp(g_last_sound, "note.harp") == 0,
+           "time-zero note is sent to every screen viewer");
+    screen_audio_tick(session, &cache, 1, 60, false, players, 2);
+    EXPECT(g_sound_count == 4 &&
+               strcmp(g_last_sound, "note.bassattack") == 0,
+           "future note follows video loop elapsed time");
+    screen_audio_tick(session, &cache, 1, 60, false, players, 2);
+    EXPECT(g_sound_count == 4, "audio notes are never repeated within a loop");
+
+    screen_audio_tick(session, &cache, 2, 0, true, players, 2);
+    EXPECT(g_sound_count == 6 && session->cursor == 1,
+           "video loop transition restarts the NBS cursor");
+    screen_audio_tick(session, &cache, 4, 950, true, players, 2);
+    EXPECT(g_sound_count == 8 && session->cursor == 3,
+           "lagged loop restart skips stale notes instead of bursting");
+
+    screen_audio_stop(&engine, 42);
+    EXPECT(screen_audio_find(&engine, 42) == nullptr,
+           "stopping video removes its screen audio session");
+    music_cache_shutdown(&cache);
+    return 1;
+}
+
+static int test_detailed_tick_reports_loop_boundary(void)
+{
+    struct video_session session = {0};
+    const char *path = fixture("test_detailed_loop.mcv");
+    EXPECT(create_test_mcv(1, 1, 20, 1, 4, path),
+           "create detailed loop fixture");
+    EXPECT(video_session_start(&session, path, 2, 88, 1000) == 0,
+           "start detailed loop session");
+
+    struct video_tick_result tick;
+    video_session_tick_detailed(&session, 1210, &tick);
+    EXPECT(tick.loop_changed && !tick.finished &&
+               tick.loop_current == 2 && tick.frame == 0 &&
+               tick.loop_elapsed_ms >= 9 && tick.loop_elapsed_ms <= 11,
+           "tick explicitly reports the second loop boundary");
+    video_session_tick_detailed(&session, 1400, &tick);
+    EXPECT(tick.finished && session.state == PLAY_FINISHED,
+           "detailed tick reports the final video boundary");
+
+    video_session_stop(&session);
+    remove(path);
+    return 1;
+}
+
 /* ================================================================
  * COMMAND AND PUBLIC VIEWER POLICY TESTS
  * ================================================================ */
 
 static int test_command_permission_and_surface(void)
 {
-    EXPECT(!mpv_command_allowed(true, false),
-           "non-operator player is denied before command dispatch");
-    EXPECT(mpv_command_allowed(true, true),
+    EXPECT(!mpv_command_allowed(true, false, "play"),
+           "non-operator player cannot control playback");
+    EXPECT(mpv_command_allowed(true, false, "watch") &&
+               mpv_command_allowed(true, false, "help"),
+           "non-operator player can manage personal viewing");
+    EXPECT(mpv_command_allowed(true, true, "play"),
            "operator player passes centralized gate");
-    EXPECT(mpv_command_allowed(false, false),
+    EXPECT(mpv_command_allowed(false, false, "play"),
            "console passes centralized gate");
 
     int catalog = 7, screens = 8, playback = 9, persistence = 10;
-    if (mpv_command_allowed(true, false)) {
+    if (mpv_command_allowed(true, false, "play")) {
         catalog = screens = playback = persistence = 0;
     }
     EXPECT(catalog == 7 && screens == 8 && playback == 9 &&
@@ -2197,11 +2327,11 @@ static int test_command_permission_and_surface(void)
         "(bind)", "(unbind)",
     };
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
-    EXPECT(MPV_COMMAND_USAGE_COUNT == 13,
-           "debug build registers exactly 13 usages");
+    EXPECT(MPV_COMMAND_USAGE_COUNT == 14,
+           "debug build registers exactly 14 usages");
 #else
-    EXPECT(MPV_COMMAND_USAGE_COUNT == 12,
-           "default build registers exactly 12 usages");
+    EXPECT(MPV_COMMAND_USAGE_COUNT == 13,
+           "default build registers exactly 13 usages");
 #endif
     EXPECT(strcmp(mpv_command_usages[5],
                    "/mpv (delete)<a: MpvDelete> <name: string>") == 0,
@@ -2213,8 +2343,9 @@ static int test_command_permission_and_surface(void)
         }
     }
     EXPECT(mpv_command_action_registered("") &&
-               mpv_command_action_registered("help"),
-           "root and help remain registered");
+               mpv_command_action_registered("help") &&
+               mpv_command_action_registered("watch"),
+           "root, help and watch remain registered");
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
     EXPECT(mpv_command_action_registered("debug"),
            "debug build registers the debug action");
@@ -2262,22 +2393,22 @@ static int test_public_viewer_eligibility(void)
            "1x1 screen center uses block-cell geometric center");
 
     struct mpv_public_snapshot below = public_snapshot(
-        center.x + 63.5, center.y, center.z, "minecraft:overworld");
+        center.x + 15.5, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot exact = public_snapshot(
-        center.x + 64.0, center.y, center.z, "minecraft:overworld");
+        center.x + 16.0, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot above = public_snapshot(
-        center.x + 64.01, center.y, center.z, "minecraft:overworld");
+        center.x + 16.01, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot other = public_snapshot(
         center.x, center.y, center.z, "minecraft:nether");
     struct mpv_public_snapshot invalid = below;
     invalid.valid = false;
 
     EXPECT(mpv_public_viewer_eligible(true, &below, &geometry),
-           "same-dimension player below 64 blocks is eligible");
+            "same-dimension player below 16 blocks is eligible");
     EXPECT(mpv_public_viewer_eligible(true, &exact, &geometry),
-           "same-dimension player exactly 64 blocks is eligible");
+            "same-dimension player exactly 16 blocks is eligible");
     EXPECT(!mpv_public_viewer_eligible(true, &above, &geometry),
-           "player above 64 blocks is excluded");
+            "player above 16 blocks is excluded");
     EXPECT(!mpv_public_viewer_eligible(true, &other, &geometry),
            "different-dimension player is excluded");
     EXPECT(!mpv_public_viewer_eligible(true, &invalid, &geometry),
@@ -2292,24 +2423,39 @@ static int test_public_viewer_collection_and_membership(void)
     struct screen_geom geometry = public_test_geometry();
     struct mpv_screen_center center = mpv_screen_center(&geometry);
     int player_a, player_b, player_far, player_other, player_invalid;
+    int player_disabled;
     struct mpv_public_candidate candidates[] = {
-        {&player_a, "a", true, public_snapshot(center.x, center.y, center.z,
-                                                "minecraft:overworld")},
-        {&player_b, "b", true, public_snapshot(center.x + 64.0, center.y,
-                                                center.z, "minecraft:overworld")},
-        {&player_far, "far", true,
-         public_snapshot(center.x + 65.0, center.y, center.z,
-                         "minecraft:overworld")},
-        {&player_other, "other", true,
-         public_snapshot(center.x, center.y, center.z, "minecraft:nether")},
-        {&player_invalid, "invalid", true, {0}},
+        {.player = &player_a, .uuid = "a", .online = true,
+         .public_media_enabled = true,
+         .snapshot = public_snapshot(center.x, center.y, center.z,
+                                     "minecraft:overworld")},
+        {.player = &player_b, .uuid = "b", .online = true,
+         .public_media_enabled = true,
+         .snapshot = public_snapshot(center.x + 16.0, center.y,
+                                     center.z, "minecraft:overworld")},
+        {.player = &player_far, .uuid = "far", .online = true,
+         .public_media_enabled = true,
+         .snapshot = public_snapshot(center.x + 17.0, center.y, center.z,
+                                     "minecraft:overworld")},
+        {.player = &player_other, .uuid = "other", .online = true,
+         .public_media_enabled = true,
+         .snapshot = public_snapshot(center.x, center.y, center.z,
+                                     "minecraft:nether")},
+        {.player = &player_invalid, .uuid = "invalid", .online = true,
+         .public_media_enabled = true},
+        {.player = &player_disabled, .uuid = "disabled", .online = true,
+         .public_media_enabled = false,
+         .snapshot = public_snapshot(center.x, center.y, center.z,
+                                     "minecraft:overworld")},
     };
     void *players[5] = {0};
     const char *ids[5] = {0};
     int count = mpv_collect_public_viewers(
-        &geometry, candidates, 5, players, ids, 5);
+        &geometry, candidates, 6, players, ids, 5);
     EXPECT(count == 2 && players[0] == &player_a && players[1] == &player_b,
-           "all nearby public players and only those players are collected");
+            "all nearby public players and only those players are collected");
+    EXPECT(players[0] != &player_disabled && players[1] != &player_disabled,
+           "disabled public media preference excludes a nearby player");
     EXPECT(strcmp(ids[0], "a") == 0 && strcmp(ids[1], "b") == 0,
            "UUIDs are carried only as diagnostics");
 
@@ -4514,6 +4660,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_clock_infinite_loop);
     RUN_TEST(test_clock_multi_loop);
     RUN_TEST(test_clock_two_screens_independent);
+    RUN_TEST(test_detailed_tick_reports_loop_boundary);
 
     printf("\n[Command Arguments]\n");
     RUN_TEST(test_args_parse_int);
@@ -4544,6 +4691,10 @@ int main(int argc, char **argv)
     RUN_TEST(test_persistence_truncated);
     RUN_TEST(test_persistence_missing_file);
     RUN_TEST(test_persistence_invalid_dimensions);
+    RUN_TEST(test_preferences_roundtrip);
+
+    printf("\n[Screen Audio]\n");
+    RUN_TEST(test_screen_audio_video_clock);
 
     printf("\n[Command and Public Viewer Policy]\n");
     RUN_TEST(test_command_permission_and_surface);

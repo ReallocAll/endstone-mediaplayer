@@ -54,9 +54,14 @@ static void send_err(void *sender, const char *fmt, ...)
 
 // --- Init / Shutdown ---
 
-void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin, const char *data_dir)
+void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin,
+                    const char *data_dir,
+                    struct music_catalog *music_catalog,
+                    struct music_cache *music_cache)
 {
     memset(ctx, 0, sizeof(*ctx));
+    ctx->music_catalog = music_catalog;
+    ctx->music_cache = music_cache;
 
     size_t dlen = strlen(data_dir);
     if (dlen >= sizeof(ctx->data_dir)) dlen = sizeof(ctx->data_dir) - 1;
@@ -64,6 +69,8 @@ void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin, const cha
     ctx->data_dir[dlen] = '\0';
 
     snprintf(ctx->save_path, sizeof(ctx->save_path), "%s/screens.json", data_dir);
+    snprintf(ctx->preferences_path, sizeof(ctx->preferences_path),
+             "%s/preferences.json", data_dir);
 
     screen_registry_init(&ctx->registry);
 
@@ -72,11 +79,14 @@ void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin, const cha
     video_catalog_init(&ctx->catalog, video_dir);
 
     video_engine_init(&ctx->engine);
+    screen_audio_engine_init(&ctx->audio);
     map_render_init(&ctx->render, server, plugin);
 
     // Load persisted screens.
     screen_persistence_set_log_plugin(plugin);
     screen_persistence_load(&ctx->registry, ctx->save_path, nullptr);
+    mpv_preferences_init(&ctx->preferences);
+    mpv_preferences_load(&ctx->preferences, ctx->preferences_path);
 
     ctx->active = 1;
 }
@@ -89,6 +99,7 @@ void video_ctx_shutdown(struct video_ctx *ctx)
     // Detach renderers before freeing session frame buffers.
     for (int i = 0; i < ctx->registry.count; i++)
         map_render_clear(&ctx->render, &ctx->registry.screens[i]);
+    screen_audio_engine_shutdown(&ctx->audio);
     video_engine_shutdown(&ctx->engine);
 
     for (int i = 0; i < ctx->registry.count; i++) {
@@ -97,6 +108,7 @@ void video_ctx_shutdown(struct video_ctx *ctx)
     }
 
     screen_persistence_save(&ctx->registry, ctx->save_path);
+    mpv_preferences_save(&ctx->preferences, ctx->preferences_path);
 }
 
 // --- Public viewer snapshots and membership ---
@@ -129,6 +141,8 @@ static int collect_public_viewers(struct video_ctx *ctx,
         candidates[i].player = ctx->online_players[i].player;
         candidates[i].uuid = ctx->online_players[i].uuid;
         candidates[i].online = true;
+        candidates[i].public_media_enabled =
+            ctx->online_players[i].public_media_enabled;
         candidates[i].snapshot = ctx->online_players[i].snapshot;
     }
     return mpv_collect_public_viewers(&screen->geom, candidates,
@@ -146,8 +160,9 @@ static void refresh_public_viewers(struct video_ctx *ctx)
         int eligible_count = 0;
         for (int s = 0; s < ctx->registry.count; s++) {
             struct screen_entry *screen = &ctx->registry.screens[s];
-            bool eligible = mpv_public_viewer_eligible(
-                true, &online->snapshot, &screen->geom);
+            bool eligible = online->public_media_enabled &&
+                mpv_public_viewer_eligible(
+                    true, &online->snapshot, &screen->geom);
             enum mpv_membership_transition transition =
                 mpv_membership_transition(&online->membership,
                                           screen->runtime_id, eligible);
@@ -173,6 +188,7 @@ static void stop_screen_playback(struct video_ctx *ctx,
                                  struct screen_entry *screen)
 {
     map_render_clear(&ctx->render, screen);
+    screen_audio_stop(&ctx->audio, screen->runtime_id);
     video_engine_release(&ctx->engine, screen->runtime_id);
     screen->playing = 0;
 }
@@ -197,19 +213,26 @@ void video_tick(struct video_ctx *ctx)
         if (!sess || sess->state != PLAY_PLAYING)
             continue;
 
-        uint32_t frame_idx = 0;
-        if (video_session_tick(sess, now, &frame_idx)) {
-            if (sess->state == PLAY_FINISHED) {
-                // Release resources as soon as playback finishes.
-                stop_screen_playback(ctx, screen);
-                continue;
-            }
+        struct video_tick_result tick;
+        video_session_tick_detailed(sess, now, &tick);
+        if (tick.finished) {
+            stop_screen_playback(ctx, screen);
+            continue;
+        }
 
-            if (video_session_load_frame(sess, frame_idx) == 0) {
-                void *op[64];
-                const char *oids[64];
-                int viewer_count = collect_public_viewers(
-                    ctx, screen, op, oids);
+        void *op[64];
+        const char *oids[64];
+        int viewer_count = collect_public_viewers(ctx, screen, op, oids);
+        struct screen_audio_session *audio =
+            screen_audio_find(&ctx->audio, screen->runtime_id);
+        if (audio) {
+            screen_audio_tick(audio, ctx->music_cache, tick.loop_current,
+                              tick.loop_elapsed_ms, tick.loop_changed,
+                              op, viewer_count);
+        }
+
+        if (tick.frame_changed) {
+            if (video_session_load_frame(sess, tick.frame) == 0) {
                 map_render_send_frame(&ctx->render, screen, sess->frame_buf,
                                       op, oids, viewer_count);
             }
@@ -231,9 +254,10 @@ static void cmd_help(struct video_ctx *ctx, void *sender)
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "play " MC_GRAY "<screen> <index> [loop]");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "pause" MC_GRAY " | " MC_YELLOW "resume" MC_GRAY " | " MC_YELLOW "stop " MC_GRAY "<screen>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "status " MC_GRAY "<screen>");
+    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "watch " MC_GRAY "[on|off]");
     sender_send_message(sender, MC_GRAY "── " MC_AQUA "Loop" MC_GRAY " ──  " MC_GRAY "-1=infinite  1=once  N=times");
     sender_send_message(sender, MC_GRAY "── " MC_AQUA "Facing" MC_GRAY " ──  " MC_GRAY "detected from the backing wall");
-    sender_send_message(sender, MC_GRAY "── " MC_AQUA "Access" MC_GRAY " ──  " MC_GRAY "public within 64 blocks");
+    sender_send_message(sender, MC_GRAY "── " MC_AQUA "Access" MC_GRAY " ──  " MC_GRAY "public within 16 blocks");
 }
 
 static void cmd_list(struct video_ctx *ctx, void *sender, int argc, const char **argv)
@@ -828,7 +852,7 @@ static void cmd_screen_info(struct video_ctx *ctx, void *sender, int argc, const
              e->geom.corner2.x, e->geom.corner2.y, e->geom.corner2.z);
     sender_send_message(sender, buf);
     sender_send_message(sender, MC_GRAY "Access: public");
-    sender_send_message(sender, MC_GRAY "View distance: 64 blocks");
+    sender_send_message(sender, MC_GRAY "View distance: 16 blocks");
 }
 
 static int ensure_screen_maps(struct video_ctx *ctx,
@@ -907,11 +931,19 @@ static void cmd_play(struct video_ctx *ctx, void *sender, void *player,
         send_err(sender, "No free playback session slot.");
         return;
     }
+    struct nbs_error_info nbs_error = {0};
+    enum screen_audio_start_result audio_result = SCREEN_AUDIO_NOT_FOUND;
+    if (ctx->music_catalog && ctx->music_cache) {
+        audio_result = screen_audio_start(
+            &ctx->audio, ctx->music_cache, ctx->music_catalog,
+            screen->runtime_id, vid->name, &nbs_error);
+    }
     int64_t now = get_mono_ms();
 
     int err = video_session_start(sess, vid->path, loop, screen->runtime_id,
                                   now);
     if (err != 0) {
+        screen_audio_stop(&ctx->audio, screen->runtime_id);
         if (err > 0)
             send_err(sender, "Failed to open video file: %s",
                      mcv_error_name((enum mcv_error)err));
@@ -926,6 +958,15 @@ static void cmd_play(struct video_ctx *ctx, void *sender, void *player,
     snprintf(buf, sizeof(buf), MC_GREEN "[MediaPlayer] " MC_GRAY "Playing '%s' on screen '%s' (loop: %d)",
              vid->name, screen->name, loop);
     sender_send_message(sender, buf);
+    if (audio_result == SCREEN_AUDIO_OK) {
+        sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY
+                            "Synchronized matching NBS soundtrack.");
+    } else if (audio_result != SCREEN_AUDIO_NOT_FOUND) {
+        snprintf(buf, sizeof(buf), MC_YELLOW "[MediaPlayer] " MC_GRAY
+                 "Video is playing without soundtrack: %s.",
+                 screen_audio_start_result_name(audio_result));
+        sender_send_message(sender, buf);
+    }
 }
 
 static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
@@ -1018,6 +1059,108 @@ static void cmd_status(struct video_ctx *ctx, void *sender, int argc, const char
     snprintf(buf, sizeof(buf), MC_GRAY "Loop: %d/%d",
              sess->loop_current, sess->loop_total == -1 ? 0 : sess->loop_total);
     sender_send_message(sender, buf);
+    struct screen_audio_session *audio =
+        screen_audio_find(&ctx->audio, screen->runtime_id);
+    sender_send_message(sender, audio
+        ? MC_GRAY "Soundtrack: synchronized NBS"
+        : MC_GRAY "Soundtrack: none");
+}
+
+static struct video_online_player *find_online_player(
+    struct video_ctx *ctx, const char *uuid)
+{
+    if (!uuid)
+        return nullptr;
+    for (int i = 0; i < ctx->online_count; i++) {
+        if (strcmp(ctx->online_players[i].uuid, uuid) == 0)
+            return &ctx->online_players[i];
+    }
+    return nullptr;
+}
+
+static void cmd_watch(struct video_ctx *ctx, void *sender, void *player,
+                      const char *player_uuid, int argc, const char **argv)
+{
+    if (!player || !player_uuid) {
+        send_err(sender, "This command can only be used by a player.");
+        return;
+    }
+    if (argc > 2) {
+        send_err(sender, "Usage: /mpv watch [on|off]");
+        return;
+    }
+
+    bool enabled =
+        mpv_preferences_enabled(&ctx->preferences, player_uuid);
+    if (argc == 1) {
+        sender_send_message(
+            sender, enabled
+                ? MC_GREEN "[MediaPlayer] " MC_GRAY
+                    "Public screen video and music are enabled."
+                : MC_YELLOW "[MediaPlayer] " MC_GRAY
+                    "Public screen video and music are disabled.");
+        return;
+    }
+
+    bool requested;
+    if (strcmp(argv[1], "on") == 0) {
+        requested = true;
+    } else if (strcmp(argv[1], "off") == 0) {
+        requested = false;
+    } else {
+        send_err(sender, "Usage: /mpv watch [on|off]");
+        return;
+    }
+
+    if (requested == enabled) {
+        sender_send_message(
+            sender, enabled
+                ? MC_GREEN "[MediaPlayer] " MC_GRAY
+                    "Public screen video and music are already enabled."
+                : MC_YELLOW "[MediaPlayer] " MC_GRAY
+                    "Public screen video and music are already disabled.");
+        return;
+    }
+
+    if (!mpv_preferences_set_enabled(&ctx->preferences, player_uuid,
+                                     requested)) {
+        send_err(sender, "Could not update your screen media preference.");
+        return;
+    }
+    if (mpv_preferences_save(&ctx->preferences,
+                             ctx->preferences_path) != 0) {
+        mpv_preferences_set_enabled(&ctx->preferences, player_uuid, enabled);
+        send_err(sender, "Could not save your screen media preference.");
+        return;
+    }
+
+    struct video_online_player *online =
+        find_online_player(ctx, player_uuid);
+    if (online)
+        online->public_media_enabled = requested;
+
+    if (!requested && online) {
+        for (int i = 0; i < ctx->registry.count; i++) {
+            struct screen_entry *screen = &ctx->registry.screens[i];
+            if (screen->tiles_initialized &&
+                mpv_membership_contains(&online->membership,
+                                        screen->runtime_id)) {
+                map_render_hide_viewer(&ctx->render, screen, player,
+                                       player_uuid);
+            }
+        }
+        mpv_membership_replace(&online->membership, nullptr, 0);
+    } else if (requested) {
+        refresh_public_viewers(ctx);
+    }
+    ctx->public_viewer_tick = 0;
+
+    sender_send_message(
+        sender, requested
+            ? MC_GREEN "[MediaPlayer] " MC_GRAY
+                "Public screen video and music are now enabled."
+            : MC_YELLOW "[MediaPlayer] " MC_GRAY
+                "Public screen video and music are now disabled.");
 }
 
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
@@ -1354,7 +1497,8 @@ void video_handle_command(struct video_ctx *ctx,
                           const char *player_uuid)
 {
     bool is_op = player ? es_player_is_op(player) : false;
-    if (!mpv_command_allowed(player != nullptr, is_op)) {
+    const char *action = argc > 0 ? argv[0] : nullptr;
+    if (!mpv_command_allowed(player != nullptr, is_op, action)) {
         send_err(sender, "You do not have permission to use /mpv.");
         return;
     }
@@ -1363,8 +1507,6 @@ void video_handle_command(struct video_ctx *ctx,
         cmd_help(ctx, sender);
         return;
     }
-
-    const char *action = argv[0];
 
     if (strcmp(action, "help") == 0) {
         cmd_help(ctx, sender);
@@ -1388,6 +1530,8 @@ void video_handle_command(struct video_ctx *ctx,
         cmd_pause_resume_stop(ctx, sender, argc, argv, 0);
     } else if (strcmp(action, "status") == 0) {
         cmd_status(ctx, sender, argc, argv);
+    } else if (strcmp(action, "watch") == 0) {
+        cmd_watch(ctx, sender, player, player_uuid, argc, argv);
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
     } else if (strcmp(action, "debug") == 0) {
         cmd_debug(ctx, sender, player, argc, argv);
@@ -1409,6 +1553,8 @@ void video_on_player_join(struct video_ctx *ctx, void *player, const char *uuid)
                    sizeof(ctx->online_players[i].snapshot));
             memset(&ctx->online_players[i].membership, 0,
                    sizeof(ctx->online_players[i].membership));
+            ctx->online_players[i].public_media_enabled =
+                mpv_preferences_enabled(&ctx->preferences, uuid);
             ctx->public_viewer_tick = 0;
             return;
         }
@@ -1420,6 +1566,8 @@ void video_on_player_join(struct video_ctx *ctx, void *player, const char *uuid)
     memset(online, 0, sizeof(*online));
     online->player = player;
     snprintf(online->uuid, sizeof(online->uuid), "%s", uuid);
+    online->public_media_enabled =
+        mpv_preferences_enabled(&ctx->preferences, uuid);
     ctx->public_viewer_tick = 0;
 }
 

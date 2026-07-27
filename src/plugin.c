@@ -315,7 +315,8 @@ static void plugin_on_enable(void *self)
     music_ctx_init(&g_music_ctx, self, data_path);
 
     void *server = PLUGIN_SERVER(self);
-    video_ctx_init(&g_video_ctx, server, self, data_path);
+    video_ctx_init(&g_video_ctx, server, self, data_path,
+                   &g_music_ctx.catalog, &g_music_ctx.cache);
 
     PLUGIN_LOG(self, ES_LOG_INFO, "MediaPlayer v" MP_VERSION " enabled!");
     PLUGIN_LOG(self, ES_LOG_INFO, "Use /mpm help for music, /mpv help for video");

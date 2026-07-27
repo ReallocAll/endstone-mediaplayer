@@ -36,7 +36,9 @@ set(MP_SOURCES
     src/endstone_api.c
     src/music/music_catalog.c
     src/music/music_cache.c
+    src/music/music_sound.c
     src/music/music_session.c
+    src/music/screen_audio.c
     src/music/music_commands.c
     src/sfunc.c
     src/screen/screen_geometry.c
@@ -46,6 +48,7 @@ set(MP_SOURCES
     src/video/video_session.c
     src/video/video_catalog.c
     src/video/video_policy.c
+    src/video/video_preferences.c
     src/video/video_args.c
     src/video/video_commands.c
     src/bedrock/world_read_abi.c
@@ -194,19 +197,29 @@ add_executable(test_video tests/test_video.c
     src/video/video_format.c
     src/video/video_session.c
     src/video/video_policy.c
+    src/video/video_preferences.c
     src/video/video_args.c
+    src/music/music_cache.c
+    src/music/music_catalog.c
+    src/music/music_sound.c
+    src/music/screen_audio.c
     src/bedrock/world_read_abi.c
     src/bedrock/world_write_abi.c
     src/map/map_abi.c
     src/map/map_render.c
     third_party/cjson/cJSON.c
     third_party/miniz/miniz.c)
+target_sources(test_video PRIVATE
+    third_party/nbsparser/nbsparser.c
+    third_party/stb/stb_ds_impl.c)
 target_include_directories(test_video PRIVATE
     include
     third_party/cppcompat/include
     third_party/cppcompat/src
     third_party/cjson
-    third_party/miniz)
+    third_party/miniz
+    third_party/nbsparser
+    third_party/stb)
 target_compile_definitions(test_video PRIVATE
     _CRT_SECURE_NO_WARNINGS
     ${MP_MINIZ_DEFINES})

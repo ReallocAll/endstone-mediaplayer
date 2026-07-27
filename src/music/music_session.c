@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "mediaplayer/music/music_session.h"
+#include "mediaplayer/music/music_sound.h"
 #include "mediaplayer/endstone_api.h"
 #include "abi_helpers.h"
 #include <stb_ds.h>
@@ -13,13 +14,6 @@
 #else
 #include <time.h>
 #endif
-
-static const char *const g_instruments[MUSIC_INSTRUMENT_COUNT] = {
-    "note.harp", "note.bassattack", "note.bd", "note.snare",
-    "note.hat", "note.guitar", "note.flute", "note.bell",
-    "note.chime", "note.xylobone", "note.iron_xylophone", "note.cow_bell",
-    "note.didgeridoo", "note.bit", "note.banjo", "note.pling",
-};
 
 static int64_t monotonic_ms(void)
 {
@@ -327,9 +321,8 @@ void music_engine_tick(struct music_engine *engine,
         while (entry->cursor < note_count &&
                song->notes[entry->cursor].time_ms <= elapsed) {
             struct music_note *note = &song->notes[entry->cursor];
-            player_play_sound(player->player,
-                              g_instruments[note->instrument],
-                              note->volume, note->pitch);
+            void *listeners[] = {player->player};
+            music_note_play(note, listeners, 1);
             entry->cursor++;
         }
 

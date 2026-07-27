@@ -1,4 +1,6 @@
 #include "mediaplayer/video/video_session.h"
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -134,10 +136,14 @@ void video_session_resume(struct video_session *s, int64_t now_ms)
     s->state = PLAY_PLAYING;
 }
 
-int video_session_tick(struct video_session *s, int64_t now_ms, uint32_t *out_frame)
+void video_session_tick_detailed(struct video_session *s, int64_t now_ms,
+                                 struct video_tick_result *result)
 {
+    if (!result)
+        return;
+    memset(result, 0, sizeof(*result));
     if (!s->active || s->state != PLAY_PLAYING)
-        return 0;
+        return;
 
     int64_t effective_now = now_ms - s->accumulated_pause;
     int64_t elapsed = effective_now - s->start_ms;
@@ -148,48 +154,59 @@ int video_session_tick(struct video_session *s, int64_t now_ms, uint32_t *out_fr
     if (frame_dur <= 0.0)
         frame_dur = 50.0;
 
-    uint32_t expected = (uint32_t)((double)elapsed / frame_dur);
     uint32_t total_frames = s->frame_count;
 
     if (total_frames == 0)
-        return 0;
+        return;
 
-    if (expected >= total_frames) {
-        if (s->loop_total == -1) {
-            expected = expected % total_frames;
-            s->loop_current = (int)(elapsed / (frame_dur * total_frames)) + 1;
-        } else if (s->loop_total > 1) {
-            // Use 64-bit arithmetic for total loop frames.
-            uint64_t total_available =
-                (uint64_t)total_frames * (uint64_t)s->loop_total;
-            if ((uint64_t)expected >= total_available) {
-                s->state = PLAY_FINISHED;
-                if (out_frame)
-                    *out_frame = total_frames - 1;
-                return 1;
-            }
-            s->loop_current = (int)(expected / total_frames) + 1;
-            expected = expected % total_frames;
-        } else {
-            s->state = PLAY_FINISHED;
-            if (out_frame)
-                *out_frame = total_frames - 1;
-            return 1;
-        }
+    int previous_loop = s->loop_current;
+    uint64_t absolute_frame = (uint64_t)((double)elapsed / frame_dur);
+    uint64_t loop_index = absolute_frame / total_frames;
+    uint64_t frame_in_loop = absolute_frame % total_frames;
+
+    if (s->loop_total != -1 &&
+        loop_index >= (uint64_t)s->loop_total) {
+        s->state = PLAY_FINISHED;
+        result->frame_changed = true;
+        result->finished = true;
+        result->frame = total_frames - 1;
+        result->loop_current = s->loop_total;
+        return;
     }
+
+    if (loop_index >= (uint64_t)INT_MAX)
+        s->loop_current = INT_MAX;
+    else
+        s->loop_current = (int)loop_index + 1;
+    uint32_t expected = (uint32_t)frame_in_loop;
+    result->loop_changed = s->loop_current != previous_loop;
+    result->loop_current = s->loop_current;
+
+    double loop_duration_ms = frame_dur * total_frames;
+    double loop_elapsed = fmod((double)elapsed, loop_duration_ms);
+    if (loop_elapsed < 0.0)
+        loop_elapsed = 0.0;
+    result->loop_elapsed_ms = (int64_t)loop_elapsed;
 
     if (expected > s->current_frame + 1) {
         s->skipped_frames += expected - s->current_frame - 1;
     }
 
-    if (expected != s->current_frame) {
+    if (expected != s->current_frame || result->loop_changed) {
         s->current_frame = expected;
-        if (out_frame)
-            *out_frame = expected;
-        return 1;
+        result->frame_changed = true;
+        result->frame = expected;
     }
+}
 
-    return 0;
+int video_session_tick(struct video_session *s, int64_t now_ms,
+                       uint32_t *out_frame)
+{
+    struct video_tick_result result;
+    video_session_tick_detailed(s, now_ms, &result);
+    if (out_frame && result.frame_changed)
+        *out_frame = result.frame;
+    return result.frame_changed ? 1 : 0;
 }
 
 int video_session_load_frame(struct video_session *s, uint32_t frame_idx)

@@ -3,6 +3,7 @@
 
 #include "mediaplayer/video/video_format.h"
 #include "mediaplayer/screen/screen_registry.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 enum play_state {
@@ -47,6 +48,15 @@ struct video_engine {
     struct video_session sessions[VIDEO_SESSION_MAX];
 };
 
+struct video_tick_result {
+    bool frame_changed;
+    bool loop_changed;
+    bool finished;
+    uint32_t frame;
+    int loop_current;
+    int64_t loop_elapsed_ms;
+};
+
 void video_engine_init(struct video_engine *eng);
 void video_engine_shutdown(struct video_engine *eng);
 
@@ -74,6 +84,10 @@ void video_session_resume(struct video_session *s, int64_t now_ms);
 
 // Advances playback and returns whether a new frame is ready.
 int video_session_tick(struct video_session *s, int64_t now_ms, uint32_t *out_frame);
+
+// Advances playback and reports frame and loop transitions.
+void video_session_tick_detailed(struct video_session *s, int64_t now_ms,
+                                 struct video_tick_result *result);
 
 // Loads a frame into the session buffer.
 int video_session_load_frame(struct video_session *s, uint32_t frame_idx);
