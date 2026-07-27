@@ -114,7 +114,7 @@ if(WIN32)
     endif()
 else()
     target_compile_options(endstone_mediaplayer PRIVATE
-        -fvisibility=hidden -fno-lto)
+        -fvisibility=default -fno-lto -fno-omit-frame-pointer)
     target_link_options(endstone_mediaplayer PRIVATE
         -fuse-ld=lld -fno-lto -Wl,-z,defs)
     target_link_libraries(endstone_mediaplayer PRIVATE m)
