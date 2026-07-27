@@ -1,0 +1,52 @@
+#ifndef ENDSTONE_MEDIAPLAYER_VIDEO_VIDEO_COMMANDS_H
+#define ENDSTONE_MEDIAPLAYER_VIDEO_VIDEO_COMMANDS_H
+
+#include "mediaplayer/screen/screen_registry.h"
+#include "mediaplayer/screen/screen_persistence.h"
+#include "mediaplayer/video/video_catalog.h"
+#include "mediaplayer/video/video_policy.h"
+#include "mediaplayer/video/video_session.h"
+#include "mediaplayer/map/map_render.h"
+
+struct video_online_player {
+    void *player;
+    char uuid[SCREEN_UUID_LEN + 1];
+    struct mpv_public_snapshot snapshot;
+    struct mpv_public_membership membership;
+};
+
+// Central video plugin context owned by plugin.c.
+struct video_ctx {
+    struct screen_registry registry;
+    struct video_catalog catalog;
+    struct video_engine engine;
+    struct map_render_ctx render;
+
+    char data_dir[512];
+    char save_path[560];
+
+    // Online players and cached public-viewer snapshots.
+    struct video_online_player online_players[64];
+    int online_count;
+    unsigned int public_viewer_tick;
+
+    int active;
+};
+
+void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin, const char *data_dir);
+void video_ctx_shutdown(struct video_ctx *ctx);
+
+// Advances active sessions and sends frames.
+void video_tick(struct video_ctx *ctx);
+
+// Handles an /mpv command from a player or the console.
+void video_handle_command(struct video_ctx *ctx,
+                          int argc, const char **argv,
+                          void *sender, void *player,
+                          const char *player_uuid);
+
+// Tracks online players for public screen playback.
+void video_on_player_join(struct video_ctx *ctx, void *player, const char *uuid);
+void video_on_player_quit(struct video_ctx *ctx, const char *uuid);
+
+#endif // ENDSTONE_MEDIAPLAYER_VIDEO_VIDEO_COMMANDS_H

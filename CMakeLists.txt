@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(endstone_mediaplayer LANGUAGES C)
 
 set(MP_VERSION "2.1.1" CACHE STRING "MediaPlayer plugin version")
+option(ENABLE_MPV_DEBUG_COMMANDS "Expose /mpv debug diagnostics" OFF)
 
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -38,9 +39,33 @@ set(MP_SOURCES
     src/music/music_session.c
     src/music/music_commands.c
     src/sfunc.c
+    src/screen/screen_geometry.c
+    src/screen/screen_registry.c
+    src/screen/screen_persistence.c
+    src/video/video_format.c
+    src/video/video_session.c
+    src/video/video_catalog.c
+    src/video/video_policy.c
+    src/video/video_args.c
+    src/video/video_commands.c
+    src/bedrock/world_read_abi.c
+    src/bedrock/world_write_abi.c
+    src/map/map_abi.c
+    src/map/map_render.c
     third_party/cppcompat/src/common/alloc.c
+    third_party/cjson/cJSON.c
+    third_party/miniz/miniz.c
     third_party/nbsparser/nbsparser.c
     third_party/stb/stb_ds_impl.c)
+
+# miniz is stripped to the in-memory deflate/inflate/CRC core; the
+# zlib-compatible names are disabled so nothing collides with a system
+# zlib that another translation unit might pull in.
+set(MP_MINIZ_DEFINES
+    MINIZ_NO_ARCHIVE_APIS
+    MINIZ_NO_STDIO
+    MINIZ_NO_TIME
+    MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 
 if(WIN32)
     list(APPEND MP_SOURCES
@@ -53,11 +78,19 @@ else()
 endif()
 
 add_library(endstone_mediaplayer SHARED ${MP_SOURCES})
-target_compile_definitions(endstone_mediaplayer PRIVATE MP_VERSION="${MP_VERSION}")
+target_compile_definitions(endstone_mediaplayer PRIVATE
+    MP_VERSION="${MP_VERSION}"
+    ${MP_MINIZ_DEFINES})
+if(ENABLE_MPV_DEBUG_COMMANDS)
+    target_compile_definitions(endstone_mediaplayer PRIVATE
+        ENABLE_MPV_DEBUG_COMMANDS=1)
+endif()
 target_include_directories(endstone_mediaplayer PRIVATE
     include
     third_party/cppcompat/include
     third_party/cppcompat/src
+    third_party/cjson
+    third_party/miniz
     third_party/nbsparser
     third_party/stb)
 set_target_properties(endstone_mediaplayer PROPERTIES
@@ -69,6 +102,16 @@ if(WIN32)
         _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
     set_property(TARGET endstone_mediaplayer PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    # Quote the expansions: an undefined variable would otherwise compare as
+    # its own literal name and trip this guard on a clean configure.
+    if(DEFINED CMAKE_MSVC_RUNTIME_LIBRARY AND
+       NOT "${CMAKE_MSVC_RUNTIME_LIBRARY}" STREQUAL "" AND
+       NOT "${CMAKE_MSVC_RUNTIME_LIBRARY}" STREQUAL "MultiThreadedDLL")
+        message(FATAL_ERROR
+            "MediaPlayer requires the dynamic UCRT (MultiThreadedDLL): it "
+            "shares a heap with endstone_runtime.dll. Refusing the requested "
+            "CMAKE_MSVC_RUNTIME_LIBRARY='${CMAKE_MSVC_RUNTIME_LIBRARY}'.")
+    endif()
 else()
     target_compile_options(endstone_mediaplayer PRIVATE
         -fvisibility=hidden -fno-lto)
@@ -142,3 +185,74 @@ if(ENABLE_SANITIZER)
 endif()
 
 add_test(NAME nbs_parser COMMAND test_nbs_parser)
+
+# Video screen system tests
+add_executable(test_video tests/test_video.c
+    src/screen/screen_geometry.c
+    src/screen/screen_registry.c
+    src/screen/screen_persistence.c
+    src/video/video_format.c
+    src/video/video_session.c
+    src/video/video_policy.c
+    src/video/video_args.c
+    src/bedrock/world_read_abi.c
+    src/bedrock/world_write_abi.c
+    src/map/map_abi.c
+    src/map/map_render.c
+    third_party/cjson/cJSON.c
+    third_party/miniz/miniz.c)
+target_include_directories(test_video PRIVATE
+    include
+    third_party/cppcompat/include
+    third_party/cppcompat/src
+    third_party/cjson
+    third_party/miniz)
+target_compile_definitions(test_video PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    ${MP_MINIZ_DEFINES})
+if(ENABLE_MPV_DEBUG_COMMANDS)
+    target_compile_definitions(test_video PRIVATE
+        ENABLE_MPV_DEBUG_COMMANDS=1)
+endif()
+set_target_properties(test_video PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+
+if(WIN32)
+    target_sources(test_video PRIVATE
+        third_party/cppcompat/src/common/alloc.c
+        third_party/cppcompat/src/msvc/string.c)
+    set_property(TARGET test_video PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+else()
+    target_sources(test_video PRIVATE
+        third_party/cppcompat/src/common/alloc.c
+        third_party/cppcompat/src/libcxx/string.c)
+    target_link_libraries(test_video PRIVATE m)
+endif()
+
+if(ENABLE_SANITIZER)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_options(test_video PRIVATE
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(test_video PRIVATE
+            -fsanitize=address,undefined)
+    elseif(WIN32)
+        set_property(TARGET test_video PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+        target_compile_options(test_video PRIVATE /fsanitize=address)
+        target_link_libraries(test_video PRIVATE "${ASAN_RUNTIME}")
+        target_link_options(test_video PRIVATE
+            "/WHOLEARCHIVE:${ASAN_THUNK}" /INCREMENTAL:NO)
+        add_custom_command(TARGET test_video POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${ASAN_DLL}" "$<TARGET_FILE_DIR:test_video>")
+    endif()
+endif()
+
+add_test(NAME video_system COMMAND test_video)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME video_converter
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_convert_video.py")
+endif()
