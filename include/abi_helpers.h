@@ -75,11 +75,12 @@ static inline void *es_vcall5_linux(void *obj, size_t slot,
     _v[2] = (char *)(data) + (count) * (elem_size); \
 } while (0)
 
+// sfunc_build copies exactly the leading three pointers into the
+// std::function buffer, so no field may be added before `instance`.
 typedef struct func_impl {
     void **vptr;
     void *func;
     void *instance;
-    bool is_void;
 } func_impl_t;
 
 func_impl_t *sfunc_alloc(void *handler, bool is_void);

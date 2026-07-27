@@ -87,7 +87,6 @@ func_impl_t *sfunc_alloc(void *handler, bool is_void)
     memset(descriptor, 0, sizeof(*descriptor));
     descriptor->vptr = is_void ? &void_vtable[2] : &event_vtable[2];
     descriptor->func = handler;
-    descriptor->is_void = is_void;
     return descriptor;
 }
 
@@ -140,7 +139,6 @@ func_impl_t *sfunc_alloc(void *handler, bool is_void)
     descriptor->vptr = is_void ? void_vtable : event_vtable;
     descriptor->func = is_void ? (void *)void_trampoline : (void *)event_trampoline;
     descriptor->instance = handler;
-    descriptor->is_void = is_void;
     return descriptor;
 }
 
