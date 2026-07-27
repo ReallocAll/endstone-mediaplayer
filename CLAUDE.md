@@ -1,19 +1,19 @@
-# CLAUDE.md — endstone_mediaplayer
+# CLAUDE.md — endstone-mediaplayer
 
 ## Project
 
-Pure C23 Endstone plugin for NBS music playback in Minecraft Bedrock Dedicated Server.
-Manually constructs MSVC C++ ABI objects (vtable, std::string, std::function) to
-interface with the Endstone C++ framework without a C++ compiler.
+Pure C23 Endstone plugin for NBS music and map video playback in Minecraft
+Bedrock Dedicated Server. It constructs the required MSVC and libc++ ABI
+objects to interface with Endstone without a C++ compiler.
 
 ## Language & Toolchain
 
 - **C standard**: C23 (`-std:c23`).  Backward compatibility with C11/C17/C99 is not required.
-- **Primary compiler**: Clang 22 (`clang-cl` on Windows, MSVC-compatible command line).
-- **Build system**: CMake 3.29+ with Ninja generator.
+- **Primary compiler**: Clang 20+ (`clang-cl` on Windows).
+- **Build system**: CMake 3.21+ with Ninja generator.
 - **MSVC compatibility**: Only required for ABI interop (STL object layout).  Do not use
   MSVC-specific extensions unless explicitly needed for ABI correctness.
-- **Target**: Windows x64, MSVC ABI (`x86_64-pc-windows-msvc`).
+- **Target**: Windows and Linux.
 
 ## Coding Principles
 
@@ -46,9 +46,19 @@ interface with the Endstone C++ framework without a C++ compiler.
 ## Memory Management
 
 - Use `cppcompat` library for all MSVC STL object construction/destruction.
-- `cppcompat` uses `malloc`/`free`; Endstone uses `operator new`/`delete`.
-  These are **different allocators** — never call `free()` on a pointer that
-  Endstone allocated, and never let Endstone `delete` a `malloc`'d pointer.
+- **Shared-heap invariant (Windows).** `cppcompat` uses `malloc`/`free` and
+  Endstone uses `operator new`/`delete`, but both bind to the *same* dynamic
+  UCRT heap because the plugin is always built with
+  `MSVC_RUNTIME_LIBRARY "MultiThreadedDLL"`.  Blocks are therefore
+  interchangeable across the boundary: the runtime may `operator delete` a
+  block the plugin `malloc`'d, and vice versa.  The managed-screen write path
+  (`world_write_abi.c`) depends on this for the fake `BlockStates` nodes and
+  every by-value `std::string` parameter a callee destroys.
+  CMake enforces the runtime-library choice and fails configuration if it is
+  ever changed — **never switch this project to a static CRT.**
+- Crossing the boundary is only safe for *raw blocks*, never for typed
+  ownership: still never hand Endstone a pointer it will treat as a different
+  type, and still match every construction with exactly one destruction.
 - For `std::string` pass-by-value to C++ APIs: use `STR_GUARD` macro from
   `abi_helpers.h`.  The C++ callee calls `operator delete` on the heap buffer
   for heap-allocated strings (>15 chars).  `STR_GUARD` saves the pre-call state
@@ -69,37 +79,31 @@ interface with the Endstone C++ framework without a C++ compiler.
 - Microsoft x64 calling convention: RCX/RDX/R8/R9 + stack.  Hidden pointer for
   return values > 8 bytes and pass-by-value parameters > 8 bytes.
 
-## Verified Vtable Slots
-
-Source: cpp-example-plugin IDA decompilation (vtable offset / 8 = slot).
-
-| Slot | Class | Method |
-|------|-------|--------|
-| 38 | Server | `createBossBar(string, BarColor, BarStyle)` |
-| 14 | BossBar | `addPlayer(Player&)` |
-| 13 | BossBar | `setVisible(bool)` |
-| 11 | BossBar | `setProgress(float)` |
-| 2 | BossBar | `setTitle(string)` |
-| 0 | BossBar | destructor |
-| 65 | Player | `playSound(Location, string, float, float)` |
-| 86 | Player | `sendPopup(string)` |
-| 24 | Actor→Player | `getLocation()` |
-
 ## Project Structure
 
+Every translation unit in this project is C.  There is no C++ source anywhere
+outside `third_party/`, and the project's own headers carry no `extern "C"`
+guards because nothing C++ ever includes them.
+
 ```
-include/   — Public headers (abi_helpers.h, endstone_abi.h, music_player.h)
+include/   — Public headers (abi_helpers.h, endstone_abi.h)
+  abi/            — Measured per-platform ABI constants (slots, offsets, sizes)
+  mediaplayer/    — bedrock/, map/, screen/, video/ module headers
 src/       — Source
   plugin.c        — Plugin lifecycle, command handler, event/scheduler registration
-  music_player.c  — Music playback engine (cache, playlist, tick)
   endstone_api.c  — Endstone API wrappers (Player, BossBar, sendMessage, fopen_utf8)
   sfunc.c         — std::function ABI construction (vtable, trampoline, pool)
-third_party/ — External libraries (cppcompat, nbsparser, stb)
+  music/          — NBS catalog, cache, sessions and /mpm commands
+  bedrock/        — Pure-C world read/write ABI path (Player, Dimension, Block,
+                    item frames and filled maps) for Windows and Linux
+  map/            — Map ABI adapter and the renderer/canvas pipeline
+  screen/         — Screen geometry, registry and JSON persistence
+  video/          — .mcv format, playback sessions, catalog, /mpv commands
+third_party/ — External libraries (cppcompat, cJSON, miniz, nbsparser, stb)
   cppcompat/      — MSVC STL ABI compatibility (compiled directly, no .lib)
   nbsparser/      — NBS file format parser
   stb/            — stb_ds dynamic array (MIT)
 build/     — Build output (compile_commands.json generated here)
-ref/       — IDA decompilation reference (gitignored, do not modify)
 ```
 
 ## Building
@@ -111,20 +115,15 @@ cmake --build build
 
 Output: `build/endstone_mediaplayer.dll`
 
-## Testing
-
-Deploy DLL to `C:/Users/ReallocAll/Code/cpp/endstone/bedrock_server/plugins/`,
-then start the server and use `/mpm help` for commands.
-
 ## Git Conventions
 
-Follow the same format as [Endstone](https://github.com/EndstoneMC/endstone):
+Follow the same format as [spark for Endstone](https://github.com/EndstoneMC/spark):
 
 ```
 type: description
 ```
 
-Types: `feat`, `fix`, `refactor`, `build`, `ci`, `docs`, `chore`, `Release`.
+Types: `feat`, `fix`, `refactor`, `build`, `ci`, `docs`, `chore`, `release`.
 
 - All lowercase, no period at end.
 - Description is imperative ("add feature" not "added feature").
