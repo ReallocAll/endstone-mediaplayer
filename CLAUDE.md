@@ -33,13 +33,18 @@ objects to interface with Endstone without a C++ compiler.
 ## Code Style
 
 - Use `//` comments, not `/* */`.
-- No `typedef` — all structs referenced as `struct tag`.
-- Functions: `snake_case`.  Types: `snake_case` with `_t` suffix.
+- No `typedef` in internal code — all internal structs are referenced as
+  `struct tag`. The stable public SDK header is the sole exception: its
+  established `mp_*` typedef names are part of the public C ABI and source API.
+- Functions and struct tags: `snake_case`. Preserve the established public
+  SDK type names; do not append `_t` to stable ABI names.
 - Constants: `UPPER_SNAKE_CASE`.  Vtable slots: `ES_CLASS_SLOT_METHOD`.
 - Offsets: `ES_CLASS_OFF_FIELD`.  Globals: `g_` prefix.
 - Use `stdint.h` types (`uint64_t`, `int32_t`) for ABI-critical code.
 - Use `static` for all internal functions and variables.
-- `calloc` for heap allocations (zero-initialized).  Check for Nnullptr after allocation.
+- Use `calloc` for heap object state that relies on zero initialization. Raw
+  byte buffers may use `malloc`, and growable buffers may use `realloc`; check
+  every allocation for `nullptr` before use.
 - Use `nullptr` (C23 keyword), never `NULL`.
 - Use standard include guards (`#ifndef`/`#define`/`#endif`), never `#pragma once`.
 
@@ -81,9 +86,11 @@ objects to interface with Endstone without a C++ compiler.
 
 ## Project Structure
 
-Every translation unit in this project is C.  There is no C++ source anywhere
-outside `third_party/`, and the project's own headers carry no `extern "C"`
-guards because nothing C++ ever includes them.
+Every production translation unit in this project is C. The public contract is
+C23 and no C++ wrapper or C++ SDK is shipped. An internal C++ compatibility test
+may include the public header to protect C linkage and layout compatibility;
+therefore `include/endstone_mediaplayer_api.h` intentionally carries a minimal
+`__cplusplus` / `extern "C"` guard. Other first-party headers do not.
 
 ```
 include/   — Public headers (abi_helpers.h, endstone_abi.h)

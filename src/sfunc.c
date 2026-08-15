@@ -38,19 +38,19 @@ static void *function_target(void *self, const void *type)
 {
     (void)self;
     (void)type;
-    return NULL;
+    return nullptr;
 }
 
 static const void *function_target_type(void *self)
 {
     (void)self;
-    return NULL;
+    return nullptr;
 }
 
-/* Itanium vtable: two prefix words followed by D1, D0, clone, clone_into,
- * destroy, destroy_deallocate, invoke, target and target_type. */
+// Itanium vtable: two prefix words followed by D1, D0, clone, clone_into,
+// destroy, destroy_deallocate, invoke, target and target_type.
 static void *void_vtable[] = {
-    NULL, NULL,
+    nullptr, nullptr,
     (void *)function_complete_destructor,
     (void *)function_deleting_destructor,
     (void *)function_clone_heap,
@@ -63,7 +63,7 @@ static void *void_vtable[] = {
 };
 
 static void *event_vtable[] = {
-    NULL, NULL,
+    nullptr, nullptr,
     (void *)function_complete_destructor,
     (void *)function_deleting_destructor,
     (void *)function_clone_heap,
@@ -76,13 +76,13 @@ static void *event_vtable[] = {
 };
 
 #define SFUNC_POOL_SIZE 8
-static func_impl_t descriptors[SFUNC_POOL_SIZE];
+static struct func_impl descriptors[SFUNC_POOL_SIZE];
 static unsigned descriptor_count;
 
-func_impl_t *sfunc_alloc(void *handler, bool is_void)
+struct func_impl *sfunc_alloc(void *handler, bool is_void)
 {
-    func_impl_t *descriptor;
-    if (descriptor_count >= SFUNC_POOL_SIZE) return NULL;
+    struct func_impl *descriptor;
+    if (descriptor_count >= SFUNC_POOL_SIZE) return nullptr;
     descriptor = &descriptors[descriptor_count++];
     memset(descriptor, 0, sizeof(*descriptor));
     descriptor->vptr = is_void ? &void_vtable[2] : &event_vtable[2];
@@ -90,7 +90,7 @@ func_impl_t *sfunc_alloc(void *handler, bool is_void)
     return descriptor;
 }
 
-void sfunc_build(void *buffer, const func_impl_t *descriptor)
+void sfunc_build(void *buffer, const struct func_impl *descriptor)
 {
     memset(buffer, 0, ES_STD_FUNCTION_SIZE);
     *(void **)((char *)buffer + 0) = descriptor->vptr;
@@ -106,8 +106,8 @@ static void *sfunc_copy(void *self, void *dst)
     memcpy(dst, self, 24);
     return dst;
 }
-static void *sfunc_target_type(void *self) { (void)self; return NULL; }
-static void *sfunc_get(void *self) { (void)self; return NULL; }
+static void *sfunc_target_type(void *self) { (void)self; return nullptr; }
+static void *sfunc_get(void *self) { (void)self; return nullptr; }
 static void sfunc_delete_this(void *self, int deleting) { (void)self; (void)deleting; }
 static void event_trampoline(void *instance, void *event)
 {
@@ -128,13 +128,13 @@ static void *event_vtable[6] = {sfunc_copy, sfunc_copy, event_call,
     sfunc_target_type, sfunc_delete_this, sfunc_get};
 static void *void_vtable[6] = {sfunc_copy, sfunc_copy, void_call,
     sfunc_target_type, sfunc_delete_this, sfunc_get};
-static func_impl_t descriptors[8];
+static struct func_impl descriptors[8];
 static unsigned descriptor_count;
 
-func_impl_t *sfunc_alloc(void *handler, bool is_void)
+struct func_impl *sfunc_alloc(void *handler, bool is_void)
 {
-    func_impl_t *descriptor;
-    if (descriptor_count >= 8) return NULL;
+    struct func_impl *descriptor;
+    if (descriptor_count >= 8) return nullptr;
     descriptor = &descriptors[descriptor_count++];
     descriptor->vptr = is_void ? void_vtable : event_vtable;
     descriptor->func = is_void ? (void *)void_trampoline : (void *)event_trampoline;
@@ -142,7 +142,7 @@ func_impl_t *sfunc_alloc(void *handler, bool is_void)
     return descriptor;
 }
 
-void sfunc_build(void *buffer, const func_impl_t *descriptor)
+void sfunc_build(void *buffer, const struct func_impl *descriptor)
 {
     memset(buffer, 0, ES_STD_FUNCTION_SIZE);
     memcpy(buffer, descriptor, 3 * sizeof(void *));

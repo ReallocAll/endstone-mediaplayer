@@ -23,8 +23,8 @@ struct es_msvc_shared_ptr {
     void *control;
 };
 
-_Static_assert(sizeof(struct es_msvc_shared_ptr) == ES_SHARED_PTR_SIZE,
-               "MSVC shared_ptr ABI size mismatch");
+static_assert(sizeof(struct es_msvc_shared_ptr) == ES_SHARED_PTR_SIZE,
+              "MSVC shared_ptr ABI size mismatch");
 
 #endif
 
@@ -51,8 +51,8 @@ struct es_libcxx_shared_ptr {
     void *control;
 };
 
-_Static_assert(sizeof(struct es_libcxx_shared_ptr) == ES_SHARED_PTR_SIZE,
-               "libc++ shared_ptr ABI size mismatch");
+static_assert(sizeof(struct es_libcxx_shared_ptr) == ES_SHARED_PTR_SIZE,
+              "libc++ shared_ptr ABI size mismatch");
 
 void es_libcxx_shared_ptr_add_ref(struct es_libcxx_shared_ptr *shared);
 void es_libcxx_shared_ptr_release(struct es_libcxx_shared_ptr *shared);

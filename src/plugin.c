@@ -1,15 +1,14 @@
-/**
- * plugin.c — Pure C Endstone MediaPlayer plugin.
- *
- * Plugin lifecycle, command handling, event/scheduler registration.
- * ABI details are in abi_helpers.h, sfunc.c, and endstone_api.c.
- */
+// plugin.c — Pure C Endstone MediaPlayer plugin.
+//
+// Plugin lifecycle, command handling, event/scheduler registration.
+// ABI details are in abi_helpers.h, sfunc.c, and endstone_api.c.
 
 #include "abi_helpers.h"
 #include "mediaplayer/endstone_api.h"
 #include "mediaplayer/music/music_commands.h"
 #include "mediaplayer/bedrock/map_abi.h"
 #include "mediaplayer/video/video_commands.h"
+#include "mediaplayer/api_provider.h"
 #include "version.h"
 #include <cppcompat/string.h>
 #include <cppcompat/vector.h>
@@ -17,9 +16,9 @@
 #include <string.h>
 #include <stdio.h>
 
-/* =====================================================================
- *  Plugin vtable
- * ===================================================================== */
+// =====================================================================
+//  Plugin vtable
+// =====================================================================
 
 static void plugin_destructor(void *self, int flags);
 static bool plugin_on_command(void *self, void *sender,
@@ -48,9 +47,9 @@ static void *g_vtable[ES_VTABLE_SLOT_COUNT] = {
     (void *)plugin_on_disable,
 };
 
-/* =====================================================================
- *  PluginDescription helpers
- * ===================================================================== */
+// =====================================================================
+//  PluginDescription helpers
+// =====================================================================
 
 #define DESC_STRING(desc, off, value) \
     cpp_string_construct((desc) + (off), (value))
@@ -101,17 +100,17 @@ static void description_destroy(char *desc)
     cpp_vector_destroy(desc + ES_DESC_OFF_PERMISSIONS);
 }
 
-/* =====================================================================
- *  Global plugin pointer (used by endstone_api.c for BossBar)
- * ===================================================================== */
+// =====================================================================
+//  Global plugin pointer (used by endstone_api.c for BossBar)
+// =====================================================================
 
 void *g_plugin = nullptr;
 static struct music_ctx g_music_ctx;
 static struct video_ctx g_video_ctx;
 
-/* =====================================================================
- *  Command class
- * ===================================================================== */
+// =====================================================================
+//  Command class
+// =====================================================================
 
 static void  cmd_dtor(void *self, int f)        { (void)self; (void)f; }
 static bool  cmd_exec(void *s, void *nd, const void *a) { (void)s;(void)nd;(void)a; return false; }
@@ -139,9 +138,9 @@ static void command_init(char *cmd, const char *name, const char *desc)
     cpp_string_construct(cmd + ES_COMMAND_OFF_DESC, desc);
 }
 
-/* =====================================================================
- *  String vector helpers
- * ===================================================================== */
+// =====================================================================
+//  String vector helpers
+// =====================================================================
 
 static void setup_string_vector(char *vec_storage, char (*strs)[ES_STRING_SIZE],
                                 const char *const *values, int count)
@@ -163,9 +162,9 @@ static int read_string_vector(const void *vec, const char **out, int max)
     return count;
 }
 
-/* =====================================================================
- *  Event handlers
- * ===================================================================== */
+// =====================================================================
+//  Event handlers
+// =====================================================================
 
 static void on_player_join(void *event)
 {
@@ -188,9 +187,9 @@ static void on_player_quit(void *event)
     }
 }
 
-/* =====================================================================
- *  Event & scheduler registration
- * ===================================================================== */
+// =====================================================================
+//  Event & scheduler registration
+// =====================================================================
 
 static void plugin_register_event(void *self, const char *event_name,
                                   void *handler, int priority)
@@ -200,7 +199,7 @@ static void plugin_register_event(void *self, const char *event_name,
     void *pm = VCALL0(server, ES_SERVER_SLOT_GET_PLUGIN_MANAGER, void *);
     if (!pm) return;
 
-    func_impl_t *impl = sfunc_alloc(handler, false);
+    struct func_impl *impl = sfunc_alloc(handler, false);
     if (!impl) return;
 
     _Alignas(8) unsigned char event_str[ES_STRING_SIZE];
@@ -229,7 +228,7 @@ static void scheduler_register_tick(void *self)
     void *scheduler = VCALL0(server, ES_SERVER_SLOT_GET_SCHEDULER, void *);
     if (!scheduler) return;
 
-    func_impl_t *impl = sfunc_alloc((void *)music_tick_wrapper, true);
+    struct func_impl *impl = sfunc_alloc((void *)music_tick_wrapper, true);
     if (!impl) return;
 
     _Alignas(8) unsigned char std_fn[ES_STD_FUNCTION_SIZE];
@@ -239,7 +238,7 @@ static void scheduler_register_tick(void *self)
     VCALL5(scheduler, ES_SCHEDULER_SLOT_RUN_TIMER, void *,
            void *, result, void *, self, void *, std_fn, uint64_t, 0ULL, uint64_t, 1ULL);
 
-    func_impl_t *vimpl = sfunc_alloc((void *)video_tick_wrapper, true);
+    struct func_impl *vimpl = sfunc_alloc((void *)video_tick_wrapper, true);
     if (!vimpl) return;
 
     _Alignas(8) unsigned char std_fn2[ES_STD_FUNCTION_SIZE];
@@ -250,9 +249,9 @@ static void scheduler_register_tick(void *self)
            void *, result2, void *, self, void *, std_fn2, uint64_t, 0ULL, uint64_t, 1ULL);
 }
 
-/* =====================================================================
- *  Plugin vtable implementations
- * ===================================================================== */
+// =====================================================================
+//  Plugin vtable implementations
+// =====================================================================
 
 static void plugin_destructor(void *self, int flags)
 {
@@ -317,6 +316,7 @@ static void plugin_on_enable(void *self)
     void *server = PLUGIN_SERVER(self);
     video_ctx_init(&g_video_ctx, server, self, data_path,
                    &g_music_ctx.catalog, &g_music_ctx.cache);
+    mp_api_provider_activate(&g_video_ctx);
 
     PLUGIN_LOG(self, ES_LOG_INFO, "MediaPlayer v" MP_VERSION " enabled!");
     PLUGIN_LOG(self, ES_LOG_INFO, "Use /mpm help for music, /mpv help for video");
@@ -331,6 +331,7 @@ static void plugin_on_enable(void *self)
 static void plugin_on_disable(void *self)
 {
     PLUGIN_LOG(self, ES_LOG_INFO, "MediaPlayer disabled!");
+    mp_api_provider_deactivate(&g_video_ctx);
     video_ctx_shutdown(&g_video_ctx);
     music_ctx_shutdown(&g_music_ctx);
     char *desc = (char *)self + ES_PLUGIN_OFF_DESCRIPTION;
@@ -338,9 +339,9 @@ static void plugin_on_disable(void *self)
     memset(desc + ES_DESC_OFF_PERMISSIONS, 0, ES_VECTOR_SIZE);
 }
 
-/* =====================================================================
- *  Entry point
- * ===================================================================== */
+// =====================================================================
+//  Entry point
+// =====================================================================
 
 _Alignas(8) static char g_commands[2][ES_COMMAND_SIZE];
 _Alignas(8) static char

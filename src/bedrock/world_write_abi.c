@@ -80,12 +80,12 @@ static void *block_at(void *dimension, struct screen_pos position)
     }
     void *block = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*get_block_fn)(void **, void *, int, int, int);
-    ((get_block_fn)VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
+    ((void (*)(void **, void *, int, int, int))
+        VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
         &block, dimension, position.x, position.y, position.z);
 #else
-    typedef void *(*get_block_fn)(void *, void **, int, int, int);
-    ((get_block_fn)VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
+    ((void *(*)(void *, void **, int, int, int))
+        VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
         dimension, &block, position.x, position.y, position.z);
 #endif
     return block;
@@ -95,11 +95,10 @@ static void block_destroy(void *block)
 {
     if (!block || !slot_target(block, ES_BLOCK_SLOT_DELETE)) return;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*delete_fn)(void *);
-    ((delete_fn)VTABLE(block)[ES_BLOCK_SLOT_DELETE])(block);
+    ((void (*)(void *))VTABLE(block)[ES_BLOCK_SLOT_DELETE])(block);
 #else
-    typedef void (*delete_fn)(void *, unsigned int);
-    ((delete_fn)VTABLE(block)[ES_BLOCK_SLOT_DELETE])(block, 1);
+    ((void (*)(void *, unsigned int))VTABLE(block)[ES_BLOCK_SLOT_DELETE])(
+        block, 1);
 #endif
 }
 
@@ -109,11 +108,11 @@ static bool block_type_equals(void *block, const char *expected)
     if (!slot_target(block, ES_BLOCK_SLOT_GET_TYPE)) return false;
     _Alignas(void *) unsigned char type[ES_STRING_SIZE] = {0};
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*get_type_fn)(void *, void *);
-    ((get_type_fn)VTABLE(block)[ES_BLOCK_SLOT_GET_TYPE])(type, block);
+    ((void (*)(void *, void *))VTABLE(block)[ES_BLOCK_SLOT_GET_TYPE])(
+        type, block);
 #else
-    typedef void *(*get_type_fn)(void *, void *);
-    ((get_type_fn)VTABLE(block)[ES_BLOCK_SLOT_GET_TYPE])(block, type);
+    ((void *(*)(void *, void *))VTABLE(block)[ES_BLOCK_SLOT_GET_TYPE])(
+        block, type);
 #endif
     bool matched = strcmp(cpp_string_str(type), expected) == 0;
     cpp_string_destroy(type);
@@ -122,9 +121,8 @@ static bool block_type_equals(void *block, const char *expected)
 
 static void block_set_data(void *block, void *block_data, bool apply_physics)
 {
-    typedef void (*set_data_fn)(void *, void *, bool);
-    ((set_data_fn)VTABLE(block)[ES_BLOCK_SLOT_SET_DATA])(block, block_data,
-                                                         apply_physics);
+    ((void (*)(void *, void *, bool))VTABLE(block)[ES_BLOCK_SLOT_SET_DATA])(
+        block, block_data, apply_physics);
 }
 
 static void block_data_destroy(void *block_data)
@@ -133,11 +131,11 @@ static void block_data_destroy(void *block_data)
         return;
     }
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*delete_fn)(void *);
-    ((delete_fn)VTABLE(block_data)[ES_BLOCK_DATA_SLOT_DELETE])(block_data);
+    ((void (*)(void *))VTABLE(block_data)[ES_BLOCK_DATA_SLOT_DELETE])(
+        block_data);
 #else
-    typedef void (*delete_fn)(void *, unsigned int);
-    ((delete_fn)VTABLE(block_data)[ES_BLOCK_DATA_SLOT_DELETE])(block_data, 1);
+    ((void (*)(void *, unsigned int))
+        VTABLE(block_data)[ES_BLOCK_DATA_SLOT_DELETE])(block_data, 1);
 #endif
 }
 
@@ -205,14 +203,14 @@ static void *create_frame_block_data(void *server, int facing_value)
     cpp_string_construct(type_name, "minecraft:frame");
     void *block_data = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*create_fn)(void **, void *, void *, void *);
-    ((create_fn)VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA_STATES])(
+    ((void (*)(void **, void *, void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA_STATES])(
         &block_data, server, type_name, &states);
     memset(type_name, 0, sizeof(type_name));
 #else
-    typedef void *(*create_fn)(void *, void **, void *, void *);
     STR_GUARD(type_name,
-              ((create_fn)VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA_STATES])(
+              ((void *(*)(void *, void **, void *, void *))
+                  VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA_STATES])(
                   server, &block_data, type_name, &states));
 #endif
     return block_data;
@@ -228,14 +226,14 @@ static void *create_air_block_data(void *server)
     cpp_string_construct(type_name, "minecraft:air"); // 13 chars: SSO
     void *block_data = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*create_fn)(void **, void *, void *);
-    ((create_fn)VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA])(
+    ((void (*)(void **, void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA])(
         &block_data, server, type_name);
     memset(type_name, 0, sizeof(type_name));
 #else
-    typedef void *(*create_fn)(void *, void **, void *);
     STR_GUARD(type_name,
-              ((create_fn)VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA])(
+              ((void *(*)(void *, void **, void *))
+                  VTABLE(server)[ES_SERVER_SLOT_CREATE_BLOCK_DATA])(
                   server, &block_data, type_name));
 #endif
     return block_data;
@@ -253,9 +251,9 @@ static void *create_filled_map_item(void *server, char *detail, int detail_size)
     // The registry name remains caller-owned.
     _Alignas(void *) unsigned char registry_name[ES_STRING_SIZE];
     cpp_string_construct(registry_name, "ItemType");
-    typedef void *(*get_registry_fn)(void *, void *);
     void *registry =
-        ((get_registry_fn)VTABLE(server)[ES_SERVER_SLOT_GET_REGISTRY])(
+        ((void *(*)(void *, void *))
+            VTABLE(server)[ES_SERVER_SLOT_GET_REGISTRY])(
             server, registry_name);
     cpp_string_destroy(registry_name);
     if (!registry) {
@@ -270,14 +268,14 @@ static void *create_filled_map_item(void *server, char *detail, int detail_size)
         .key_len = 10,
     };
 #if defined(ES_PLATFORM_LINUX)
-    typedef void *(*registry_get_fn)(void *, struct es_identifier);
     void *item_type =
-        ((registry_get_fn)VTABLE(registry)[ES_ITEM_REGISTRY_SLOT_GET])(
+        ((void *(*)(void *, struct es_identifier))
+            VTABLE(registry)[ES_ITEM_REGISTRY_SLOT_GET])(
             registry, identifier);
 #else
-    typedef void *(*registry_get_fn)(void *, struct es_identifier *);
     void *item_type =
-        ((registry_get_fn)VTABLE(registry)[ES_ITEM_REGISTRY_SLOT_GET])(
+        ((void *(*)(void *, struct es_identifier *))
+            VTABLE(registry)[ES_ITEM_REGISTRY_SLOT_GET])(
             registry, &identifier);
 #endif
     if (!item_type) {
@@ -287,12 +285,11 @@ static void *create_filled_map_item(void *server, char *detail, int detail_size)
 
     void *impl = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*create_stack_fn)(void **, void *, int);
-    ((create_stack_fn)VTABLE(item_type)[
+    ((void (*)(void **, void *, int))VTABLE(item_type)[
         ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK])(&impl, item_type, 1);
 #else
-    typedef void *(*create_stack_fn)(void *, void **, int);
-    ((create_stack_fn)VTABLE(item_type)[ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK])(
+    ((void *(*)(void *, void **, int))
+        VTABLE(item_type)[ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK])(
         item_type, &impl, 1);
 #endif
     if (!impl) {
@@ -305,11 +302,10 @@ static void item_impl_destroy(void *impl)
 {
     if (!impl || !slot_target(impl, ES_ITEM_STACK_SLOT_DELETE)) return;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*delete_fn)(void *);
-    ((delete_fn)VTABLE(impl)[ES_ITEM_STACK_SLOT_DELETE])(impl);
+    ((void (*)(void *))VTABLE(impl)[ES_ITEM_STACK_SLOT_DELETE])(impl);
 #else
-    typedef void (*delete_fn)(void *, unsigned int);
-    ((delete_fn)VTABLE(impl)[ES_ITEM_STACK_SLOT_DELETE])(impl, 1);
+    ((void (*)(void *, unsigned int))VTABLE(impl)[ES_ITEM_STACK_SLOT_DELETE])(
+        impl, 1);
 #endif
 }
 
@@ -318,12 +314,12 @@ static void *item_get_meta(void *impl)
 {
     void *meta = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*get_meta_fn)(void **, void *);
-    ((get_meta_fn)VTABLE(impl)[ES_ITEM_STACK_SLOT_GET_ITEM_META])(
+    ((void (*)(void **, void *))
+        VTABLE(impl)[ES_ITEM_STACK_SLOT_GET_ITEM_META])(
         &meta, impl);
 #else
-    typedef void *(*get_meta_fn)(void *, void **);
-    ((get_meta_fn)VTABLE(impl)[ES_ITEM_STACK_SLOT_GET_ITEM_META])(impl, &meta);
+    ((void *(*)(void *, void **))
+        VTABLE(impl)[ES_ITEM_STACK_SLOT_GET_ITEM_META])(impl, &meta);
 #endif
     return meta;
 }
@@ -332,39 +328,36 @@ static void meta_destroy(void *meta)
 {
     if (!meta || !slot_target(meta, ES_ITEM_META_SLOT_DELETE)) return;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*delete_fn)(void *);
-    ((delete_fn)VTABLE(meta)[ES_ITEM_META_SLOT_DELETE])(meta);
+    ((void (*)(void *))VTABLE(meta)[ES_ITEM_META_SLOT_DELETE])(meta);
 #else
-    typedef void (*delete_fn)(void *, unsigned int);
-    ((delete_fn)VTABLE(meta)[ES_ITEM_META_SLOT_DELETE])(meta, 1);
+    ((void (*)(void *, unsigned int))VTABLE(meta)[ES_ITEM_META_SLOT_DELETE])(
+        meta, 1);
 #endif
 }
 
 // Verifies that ItemMeta is MapMeta.
 static bool meta_is_map(void *meta)
 {
-    typedef int (*get_type_fn)(void *);
-    return ((get_type_fn)VTABLE(meta)[ES_ITEM_META_SLOT_GET_TYPE])(meta) ==
+    return ((int (*)(void *))VTABLE(meta)[ES_ITEM_META_SLOT_GET_TYPE])(meta) ==
            ES_ITEM_META_TYPE_MAP;
 }
 
 static bool meta_has_map_id(void *meta)
 {
-    typedef bool (*has_id_fn)(void *);
-    return ((has_id_fn)VTABLE(meta)[ES_MAP_META_SLOT_HAS_MAP_ID])(meta);
+    return ((bool (*)(void *))VTABLE(meta)[ES_MAP_META_SLOT_HAS_MAP_ID])(meta);
 }
 
 static int64_t meta_get_map_id(void *meta)
 {
-    typedef int64_t (*get_id_fn)(void *);
-    return ((get_id_fn)VTABLE(meta)[ES_MAP_META_SLOT_GET_MAP_ID])(meta);
+    return ((int64_t (*)(void *))VTABLE(meta)[ES_MAP_META_SLOT_GET_MAP_ID])(
+        meta);
 }
 
 static void meta_set_map_view(void *meta, void *map_view)
 {
     // Borrowed MapView; the callee reads MapView slot 1 getId internally.
-    typedef void (*set_view_fn)(void *, const void *);
-    ((set_view_fn)VTABLE(meta)[ES_MAP_META_SLOT_SET_MAP_VIEW])(meta, map_view);
+    ((void (*)(void *, const void *))
+        VTABLE(meta)[ES_MAP_META_SLOT_SET_MAP_VIEW])(meta, map_view);
 }
 
 static void meta_set_display_name(void *meta, const char *name)
@@ -373,9 +366,9 @@ static void meta_set_display_name(void *meta, const char *name)
     struct es_optional_string parameter = {0};
     cpp_string_construct(parameter.value, name);
     parameter.has_value = 1;
-    typedef void (*set_name_fn)(void *, void *);
     STR_GUARD(parameter.value,
-              ((set_name_fn)VTABLE(meta)[ES_ITEM_META_SLOT_SET_DISPLAY_NAME])(
+              ((void (*)(void *, void *))
+                  VTABLE(meta)[ES_ITEM_META_SLOT_SET_DISPLAY_NAME])(
                   meta, &parameter));
 }
 
@@ -393,8 +386,8 @@ static bool item_impl_has_map_id(void *impl, int64_t map_id)
 static bool item_set_meta(void *impl, void *meta)
 {
     // Borrows and copies the meta; the caller still owns and frees it.
-    typedef bool (*set_meta_fn)(void *, const void *);
-    return ((set_meta_fn)VTABLE(impl)[ES_ITEM_STACK_SLOT_SET_ITEM_META])(
+    return ((bool (*)(void *, const void *))
+        VTABLE(impl)[ES_ITEM_STACK_SLOT_SET_ITEM_META])(
         impl, meta);
 }
 
@@ -404,15 +397,13 @@ static bool item_set_meta(void *impl, void *meta)
 static void *player_inventory(void *player)
 {
     if (!slot_target(player, ES_PLAYER_SLOT_GET_INVENTORY)) return nullptr;
-    typedef void *(*get_inventory_fn)(void *);
-    return ((get_inventory_fn)VTABLE(player)[ES_PLAYER_SLOT_GET_INVENTORY])(
+    return ((void *(*)(void *))VTABLE(player)[ES_PLAYER_SLOT_GET_INVENTORY])(
         player);
 }
 
 static int inventory_size(void *inventory)
 {
-    typedef int (*get_size_fn)(void *);
-    return ((get_size_fn)VTABLE(inventory)[ES_INVENTORY_SLOT_GET_SIZE])(
+    return ((int (*)(void *))VTABLE(inventory)[ES_INVENTORY_SLOT_GET_SIZE])(
         inventory);
 }
 
@@ -422,12 +413,12 @@ static void inventory_get_item(void *inventory, int slot,
 {
     memset(out, 0, sizeof(*out));
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*get_item_fn)(void *, void *, int);
-    ((get_item_fn)VTABLE(inventory)[ES_INVENTORY_SLOT_GET_ITEM])(
+    ((void (*)(void *, void *, int))
+        VTABLE(inventory)[ES_INVENTORY_SLOT_GET_ITEM])(
         out, inventory, slot);
 #else
-    typedef void *(*get_item_fn)(void *, void *, int);
-    ((get_item_fn)VTABLE(inventory)[ES_INVENTORY_SLOT_GET_ITEM])(
+    ((void *(*)(void *, void *, int))
+        VTABLE(inventory)[ES_INVENTORY_SLOT_GET_ITEM])(
         inventory, out, slot);
 #endif
 }
@@ -437,17 +428,16 @@ static void inventory_get_item(void *inventory, int slot,
 static void inventory_set_item(void *inventory, int slot,
                                struct es_optional_item_stack *parameter)
 {
-    typedef void (*set_item_fn)(void *, int, void *);
-    ((set_item_fn)VTABLE(inventory)[ES_INVENTORY_SLOT_SET_ITEM])(
+    ((void (*)(void *, int, void *))
+        VTABLE(inventory)[ES_INVENTORY_SLOT_SET_ITEM])(
         inventory, slot, parameter);
 }
 
 static void inventory_clear_slot(void *inventory, int slot)
 {
     // Slot 23 is clear(int); slot 22 would clear the entire inventory.
-    typedef void (*clear_fn)(void *, int);
-    ((clear_fn)VTABLE(inventory)[ES_INVENTORY_SLOT_CLEAR_SLOT])(inventory,
-                                                                slot);
+    ((void (*)(void *, int))VTABLE(inventory)[ES_INVENTORY_SLOT_CLEAR_SLOT])(
+        inventory, slot);
 }
 
 // --- Public write API ---

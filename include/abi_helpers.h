@@ -34,8 +34,8 @@ static inline void es_shared_ptr_release(void *storage)
         if (previous == 0)
             ((void (*)(void *))vtable[4])(control);
     }
-    ((void **)storage)[0] = NULL;
-    ((void **)storage)[1] = NULL;
+    ((void **)storage)[0] = nullptr;
+    ((void **)storage)[1] = nullptr;
 }
 
 static inline void *es_vcall5_linux(void *obj, size_t slot,
@@ -51,7 +51,7 @@ static inline void *es_vcall5_linux(void *obj, size_t slot,
     }
     ((void (*)(void *, void *, void *, int, void *, bool))fn)(
         obj, (void *)a1, (void *)a2, (int)a3, (void *)a4, (bool)a5);
-    return NULL;
+    return nullptr;
 }
 #define VCALL5(obj, slot, ret, T1, a1, T2, a2, T3, a3, T4, a4, T5, a5) \
     ((ret)es_vcall5_linux((obj), (slot), (uintptr_t)(a1), (uintptr_t)(a2), \
@@ -77,14 +77,14 @@ static inline void *es_vcall5_linux(void *obj, size_t slot,
 
 // sfunc_build copies exactly the leading three pointers into the
 // std::function buffer, so no field may be added before `instance`.
-typedef struct func_impl {
+struct func_impl {
     void **vptr;
     void *func;
     void *instance;
-} func_impl_t;
+};
 
-func_impl_t *sfunc_alloc(void *handler, bool is_void);
-void sfunc_build(void *buffer, const func_impl_t *impl);
+struct func_impl *sfunc_alloc(void *handler, bool is_void);
+void sfunc_build(void *buffer, const struct func_impl *impl);
 #define SFUNC_BUILD(buf, impl) sfunc_build((buf), (impl))
 
 #if ES_PLATFORM_LINUX

@@ -12,34 +12,33 @@ bool es_map_abi_supported(void)
 
 void *es_server_create_map(void *server, void *dimension)
 {
-    typedef void *(*fn_t)(void *, void *);
-    return ((fn_t)VTABLE(server)[ES_SERVER_SLOT_CREATE_MAP])(server, dimension);
+    return ((void *(*)(void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_CREATE_MAP])(server, dimension);
 }
 
 void *es_server_get_map(void *server, int64_t map_id)
 {
-    typedef void *(*fn_t)(void *, int64_t);
-    return ((fn_t)VTABLE(server)[ES_SERVER_SLOT_GET_MAP])(server, map_id);
+    return ((void *(*)(void *, int64_t))
+        VTABLE(server)[ES_SERVER_SLOT_GET_MAP])(server, map_id);
 }
 
 int64_t es_map_view_get_id(void *map_view)
 {
-    typedef int64_t (*fn_t)(void *);
-    return ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_GET_ID])(map_view);
+    return ((int64_t (*)(void *))VTABLE(map_view)[ES_MAPVIEW_SLOT_GET_ID])(
+        map_view);
 }
 
 void es_map_view_set_locked(void *map_view, bool locked)
 {
-    typedef void (*fn_t)(void *, bool);
-    ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_SET_LOCKED])(map_view, locked);
+    ((void (*)(void *, bool))VTABLE(map_view)[ES_MAPVIEW_SLOT_SET_LOCKED])(
+        map_view, locked);
 }
 
 void es_map_view_add_renderer(void *map_view, void *shared_ptr_storage)
 {
     // addRenderer(std::shared_ptr<MapRenderer>) receives a pointer to the
     // 16-byte by-value parameter in RDX. The callee destroys that parameter.
-    typedef void (*fn_t)(void *, void *);
-    ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_ADD_RENDERER])(
+    ((void (*)(void *, void *))VTABLE(map_view)[ES_MAPVIEW_SLOT_ADD_RENDERER])(
         map_view, shared_ptr_storage);
 }
 
@@ -47,22 +46,21 @@ bool es_map_view_remove_renderer(void *map_view, const void *shared_ptr_storage)
 {
     // removeRenderer(const std::shared_ptr<MapRenderer>&) receives the address
     // of caller-owned storage and does not consume that ownership.
-    typedef bool (*fn_t)(void *, const void *);
-    return ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_REMOVE_RENDERER])(
+    return ((bool (*)(void *, const void *))
+        VTABLE(map_view)[ES_MAPVIEW_SLOT_REMOVE_RENDERER])(
         map_view, shared_ptr_storage);
 }
 
 void es_player_send_map(void *player, void *map_view)
 {
     // EndstonePlayer::sendMap(MapView&): RCX=this, RDX=&map, void return.
-    typedef void (*fn_t)(void *, void *);
-    ((fn_t)VTABLE(player)[ES_PLAYER_SLOT_SEND_MAP])(player, map_view);
+    ((void (*)(void *, void *))VTABLE(player)[ES_PLAYER_SLOT_SEND_MAP])(
+        player, map_view);
 }
 
 bool es_player_is_op(void *player)
 {
-    typedef bool (*fn_t)(void *);
-    return ((fn_t)VTABLE(player)[ES_PLAYER_SLOT_IS_OP])(player);
+    return ((bool (*)(void *))VTABLE(player)[ES_PLAYER_SLOT_IS_OP])(player);
 }
 
 void *es_player_send_map_target(void *player)
@@ -78,8 +76,8 @@ bool es_player_uuid_string(void *player, char output[37])
     void *offline_player = (char *)player +
                            ES_ENDSTONE_PLAYER_OFF_OFFLINE_PLAYER;
     unsigned char uuid[ES_UUID_SIZE] = {0};
-    typedef void *(*fn_t)(void *, void *);
-    ((fn_t)VTABLE(offline_player)[ES_OFFLINE_PLAYER_SLOT_GET_UNIQUE_ID])(
+    ((void *(*)(void *, void *))
+        VTABLE(offline_player)[ES_OFFLINE_PLAYER_SLOT_GET_UNIQUE_ID])(
         offline_player, uuid);
 
     static const char digits[] = "0123456789abcdef";
@@ -104,8 +102,8 @@ bool es_probe_block_actor(void *dimension, int x, int y, int z,
     memset(probe, 0, sizeof(*probe));
 
     void *block = nullptr;
-    typedef void *(*get_block_fn)(void *, void **, int, int, int);
-    ((get_block_fn)VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
+    ((void *(*)(void *, void **, int, int, int))
+        VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
         dimension, &block, x, y, z);
     if (!block) {
         return false;
@@ -116,8 +114,7 @@ bool es_probe_block_actor(void *dimension, int x, int y, int z,
                                     ES_ENDSTONE_BLOCK_OFF_BLOCK_SOURCE);
     if (block_source) {
         int block_pos[3] = {x, y, z};
-        typedef void *(*get_actor_fn)(void *, const int *);
-        void *actor = ((get_actor_fn)
+        void *actor = ((void *(*)(void *, const int *))
             VTABLE(block_source)[ES_BLOCK_SOURCE_SLOT_GET_BLOCK_ENTITY])(
                 block_source, block_pos);
         probe->block_actor = actor;
@@ -135,8 +132,7 @@ bool es_probe_block_actor(void *dimension, int x, int y, int z,
     }
 
     // Destroy the temporary unique_ptr<Block> exactly as MSVC delete would.
-    typedef void (*delete_fn)(void *, unsigned int);
-    ((delete_fn)VTABLE(block)[0])(block, 1);
+    ((void (*)(void *, unsigned int))VTABLE(block)[0])(block, 1);
     return probe->block_actor_found;
 }
 
@@ -180,53 +176,51 @@ bool es_map_abi_supported(void)
 
 void *es_server_create_map(void *server, void *dimension)
 {
-    typedef void *(*fn_t)(void *, void *);
-    return ((fn_t)VTABLE(server)[ES_SERVER_SLOT_CREATE_MAP])(
+    return ((void *(*)(void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_CREATE_MAP])(
         server, dimension);
 }
 
 void *es_server_get_map(void *server, int64_t map_id)
 {
-    typedef void *(*fn_t)(void *, int64_t);
-    return ((fn_t)VTABLE(server)[ES_SERVER_SLOT_GET_MAP])(server, map_id);
+    return ((void *(*)(void *, int64_t))
+        VTABLE(server)[ES_SERVER_SLOT_GET_MAP])(server, map_id);
 }
 
 int64_t es_map_view_get_id(void *map_view)
 {
-    typedef int64_t (*fn_t)(void *);
-    return ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_GET_ID])(map_view);
+    return ((int64_t (*)(void *))VTABLE(map_view)[ES_MAPVIEW_SLOT_GET_ID])(
+        map_view);
 }
 
 void es_map_view_set_locked(void *map_view, bool locked)
 {
-    typedef void (*fn_t)(void *, bool);
-    ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_SET_LOCKED])(map_view, locked);
+    ((void (*)(void *, bool))VTABLE(map_view)[ES_MAPVIEW_SLOT_SET_LOCKED])(
+        map_view, locked);
 }
 
 void es_map_view_add_renderer(void *map_view, void *shared_ptr_storage)
 {
-    typedef void (*fn_t)(void *, void *);
-    ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_ADD_RENDERER])(
+    ((void (*)(void *, void *))VTABLE(map_view)[ES_MAPVIEW_SLOT_ADD_RENDERER])(
         map_view, shared_ptr_storage);
 }
 
 bool es_map_view_remove_renderer(void *map_view, const void *shared_ptr_storage)
 {
-    typedef bool (*fn_t)(void *, const void *);
-    return ((fn_t)VTABLE(map_view)[ES_MAPVIEW_SLOT_REMOVE_RENDERER])(
+    return ((bool (*)(void *, const void *))
+        VTABLE(map_view)[ES_MAPVIEW_SLOT_REMOVE_RENDERER])(
         map_view, shared_ptr_storage);
 }
 
 void es_player_send_map(void *player, void *map_view)
 {
-    typedef void (*fn_t)(void *, void *);
-    ((fn_t)VTABLE(player)[ES_PLAYER_SLOT_SEND_MAP])(player, map_view);
+    ((void (*)(void *, void *))VTABLE(player)[ES_PLAYER_SLOT_SEND_MAP])(
+        player, map_view);
 }
 
 bool es_player_is_op(void *player)
 {
-    typedef bool (*fn_t)(void *);
-    return ((fn_t)VTABLE(player)[ES_PLAYER_SLOT_IS_OP])(player);
+    return ((bool (*)(void *))VTABLE(player)[ES_PLAYER_SLOT_IS_OP])(player);
 }
 
 void *es_player_send_map_target(void *player)
@@ -244,9 +238,8 @@ bool es_player_uuid_string(void *player, char output[37])
     struct es_uuid_value {
         unsigned char bytes[ES_UUID_SIZE];
     };
-    typedef struct es_uuid_value (*fn_t)(void *);
     struct es_uuid_value uuid =
-        ((fn_t)VTABLE(offline_player)[
+        ((struct es_uuid_value (*)(void *))VTABLE(offline_player)[
             ES_OFFLINE_PLAYER_SLOT_GET_UNIQUE_ID])(offline_player);
 
     static const char digits[] = "0123456789abcdef";
@@ -270,15 +263,14 @@ bool es_probe_block_actor(void *dimension, int x, int y, int z,
     }
     memset(probe, 0, sizeof(*probe));
     void *block = nullptr;
-    typedef void (*get_block_fn)(void **, void *, int, int, int);
-    ((get_block_fn)VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
+    ((void (*)(void **, void *, int, int, int))
+        VTABLE(dimension)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
         &block, dimension, x, y, z);
     if (!block) {
         return false;
     }
     probe->block_found = true;
-    typedef void (*delete_fn)(void *);
-    ((delete_fn)VTABLE(block)[ES_BLOCK_SLOT_DELETE])(block);
+    ((void (*)(void *))VTABLE(block)[ES_BLOCK_SLOT_DELETE])(block);
     return false;
 }
 

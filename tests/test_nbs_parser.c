@@ -1,13 +1,12 @@
-/**
- * test_nbs_parser.c — NBS parser unit tests.
- *
- * Tests cover:
- * - Valid NBS files (v0, v2, v4, v5)
- * - Malformed/truncated files
- * - Boundary values
- * - Resource limit enforcement
- * - Memory safety (leaks, use-after-free)
- */
+// test_nbs_parser.c — NBS parser unit tests.
+//
+// Tests cover:
+// - Valid NBS files (v0, v2, v4, v5)
+// - Malformed/truncated files
+// - Boundary values
+// - Resource limit enforcement
+// - Memory safety (leaks, use-after-free)
+//
 
 #include "nbsparser.h"
 #include <stb_ds.h>
@@ -34,12 +33,12 @@ static int tests_failed = 0;
     if (test()) { tests_passed++; } \
 } while (0)
 
-/* Helper: write uint8 to buffer */
+//Helper: write uint8 to buffer
 static void write_u8(FILE *fp, uint8_t v) {
     fwrite(&v, 1, 1, fp);
 }
 
-/* Helper: write uint16 LE to buffer */
+//Helper: write uint16 LE to buffer
 static void write_u16(FILE *fp, uint16_t v) {
     uint8_t buf[2];
     buf[0] = v & 0xFF;
@@ -47,7 +46,7 @@ static void write_u16(FILE *fp, uint16_t v) {
     fwrite(buf, 2, 1, fp);
 }
 
-/* Helper: write uint32 LE to buffer */
+//Helper: write uint32 LE to buffer
 static void write_u32(FILE *fp, uint32_t v) {
     uint8_t buf[4];
     buf[0] = v & 0xFF;
@@ -57,7 +56,7 @@ static void write_u32(FILE *fp, uint32_t v) {
     fwrite(buf, 4, 1, fp);
 }
 
-/* Helper: write string with length prefix */
+//Helper: write string with length prefix
 static void write_string(FILE *fp, const char *s) {
     uint32_t len = s ? (uint32_t)strlen(s) : 0;
     write_u32(fp, len);
@@ -66,12 +65,12 @@ static void write_string(FILE *fp, const char *s) {
     }
 }
 
-/* Helper: write notes section terminator (single jump=0 ends the section) */
+//Helper: write notes section terminator (single jump=0 ends the section)
 static void write_notes_end(FILE *fp) {
-    write_u16(fp, 0);  /* tick jump = 0, end of notes section */
+    write_u16(fp, 0);  //tick jump = 0, end of notes section
 }
 
-/* Helper: write a simple note */
+//Helper: write a simple note
 static void write_note(FILE *fp, uint16_t tick_jump, uint16_t layer_jump,
                        uint8_t instrument, uint8_t key) {
     write_u16(fp, tick_jump);
@@ -80,7 +79,7 @@ static void write_note(FILE *fp, uint16_t tick_jump, uint16_t layer_jump,
     write_u8(fp, key);
 }
 
-/* Helper: write a complete v4 file containing one note and one layer. */
+//Helper: write a complete v4 file containing one note and one layer.
 static void write_v4_value_test(FILE *fp, uint8_t key, uint8_t velocity,
                                 uint8_t note_panning, uint8_t layer_volume) {
     write_u16(fp, 0);
@@ -106,61 +105,61 @@ static void write_v4_value_test(FILE *fp, uint8_t key, uint8_t velocity,
     write_u8(fp, 0);
 }
 
-/* ==================== Valid File Tests ==================== */
+//==================== Valid File Tests ====================
 
-/* Test: Empty file (only header minimum) should fail gracefully */
+//Test: Empty file (only header minimum) should fail gracefully
 static int test_empty_file(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    /* Empty file should fail at header read (song_length) */
-    EXPECT(song == NULL, "song should be NULL");
+    //Empty file should fail at header read (song_length)
+    EXPECT(song == nullptr, "song should be NULL");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated error");
 
     fclose(fp);
     return 1;
 }
 
-/* Test: Valid minimal NBS v0 file */
+//Test: Valid minimal NBS v0 file
 static int test_valid_v0(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Header: song_length=1 (means v0), song_layers=1 */
-    write_u16(fp, 1);  /* song_length (non-zero means v0) */
-    write_u16(fp, 1);  /* song_layers */
+    //Header: song_length=1 (means v0), song_layers=1
+    write_u16(fp, 1);  //song_length (non-zero means v0)
+    write_u16(fp, 1);  //song_layers
 
-    /* Strings */
+    //Strings
     write_string(fp, "Test Song");
     write_string(fp, "Author");
     write_string(fp, "Original");
     write_string(fp, "Desc");
 
-    /* Tempo and other fields */
-    write_u16(fp, 2000);  /* tempo = 20.00 * 100 = 2000 */
-    write_u8(fp, 0);   /* auto_save */
-    write_u8(fp, 0);   /* auto_save_duration */
-    write_u8(fp, 4);   /* time_signature (4/4) */
-    write_u32(fp, 0);  /* minutes_spent */
-    write_u32(fp, 0);  /* left_clicks */
-    write_u32(fp, 0);  /* right_clicks */
-    write_u32(fp, 0);  /* blocks_added */
-    write_u32(fp, 0);  /* blocks_removed */
-    write_string(fp, "");  /* song_origin (empty) */
-    /* v0 doesn't have loop fields */
+    //Tempo and other fields
+    write_u16(fp, 2000);  //tempo = 20.00 * 100 = 2000
+    write_u8(fp, 0);   //auto_save
+    write_u8(fp, 0);   //auto_save_duration
+    write_u8(fp, 4);   //time_signature (4/4)
+    write_u32(fp, 0);  //minutes_spent
+    write_u32(fp, 0);  //left_clicks
+    write_u32(fp, 0);  //right_clicks
+    write_u32(fp, 0);  //blocks_added
+    write_u32(fp, 0);  //blocks_removed
+    write_string(fp, "");  //song_origin (empty)
+    //v0 doesn't have loop fields
 
-    /* Notes section: empty (just terminator) */
+    //Notes section: empty (just terminator)
     write_notes_end(fp);
 
-    /* Layers section: 1 layer (v0: name + volume only, no panning) */
+    //Layers section: 1 layer (v0: name + volume only, no panning)
     write_string(fp, "Layer 1");
-    write_u8(fp, 0);   /* volume */
-    /* v0 has no panning field */
+    write_u8(fp, 0);   //volume
+    //v0 has no panning field
 
-    /* Instruments: count=0 */
+    //Instruments: count=0
     write_u8(fp, 0);
 
     rewind(fp);
@@ -169,12 +168,12 @@ static int test_valid_v0(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    if (song == NULL) {
+    if (song == nullptr) {
         fprintf(stderr, "    debug: code=%d section=%d offset=%lld\n",
                 err.code, err.section, (long long)err.file_offset);
     }
 
-    EXPECT(song != NULL, "song should parse");
+    EXPECT(song != nullptr, "song should parse");
     EXPECT(song->version == 0, "version should be 0");
     EXPECT(song->song_layers == 1, "should have 1 layer");
     EXPECT(song->tempo == 20.0f, "tempo should be 20.0");
@@ -184,26 +183,26 @@ static int test_valid_v0(void) {
     return 1;
 }
 
-/* Test: Valid NBS v4 file with notes */
+//Test: Valid NBS v4 file with notes
 static int test_valid_v4(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Header: song_length=0 (means v2+), then version byte */
-    write_u16(fp, 0);  /* song_length = 0, triggers version read */
-    write_u8(fp, 4);   /* version = 4 */
-    write_u8(fp, 10);  /* default_instruments */
-    write_u16(fp, 100);/* song_length (v3+) */
-    write_u16(fp, 2);  /* song_layers */
+    //Header: song_length=0 (means v2+), then version byte
+    write_u16(fp, 0);  //song_length = 0, triggers version read
+    write_u8(fp, 4);   //version = 4
+    write_u8(fp, 10);  //default_instruments
+    write_u16(fp, 100);//song_length (v3+)
+    write_u16(fp, 2);  //song_layers
 
-    /* Strings */
+    //Strings
     write_string(fp, "Test V4");
     write_string(fp, "Author");
     write_string(fp, "Original");
     write_string(fp, "Desc");
 
-    /* Tempo and fields */
-    write_u16(fp, 1000); /* tempo = 10.00 */
+    //Tempo and fields
+    write_u16(fp, 1000); //tempo = 10.00
     write_u8(fp, 0);
     write_u8(fp, 0);
     write_u8(fp, 4);
@@ -213,32 +212,32 @@ static int test_valid_v4(void) {
     write_u32(fp, 0);
     write_u32(fp, 0);
     write_string(fp, "");
-    write_u8(fp, 0);   /* loop */
-    write_u8(fp, 0);   /* max_loop_count */
-    write_u16(fp, 0);  /* loop_start */
+    write_u8(fp, 0);   //loop
+    write_u8(fp, 0);   //max_loop_count
+    write_u16(fp, 0);  //loop_start
 
-    /* Notes section: 1 note at tick 0, layer 0 */
-    write_u16(fp, 1);  /* tick jump = 1 (tick 0) */
-    write_u16(fp, 1);  /* layer jump = 1 (layer 0) */
-    write_u8(fp, 0);   /* instrument = 0 (harp) */
-    write_u8(fp, 60);  /* key = 60 (C4) */
-    write_u8(fp, 100); /* velocity */
-    write_u8(fp, 100); /* panning (center) */
-    write_u16(fp, 0);  /* pitch */
-    write_u16(fp, 0);  /* end of layers for this tick */
+    //Notes section: 1 note at tick 0, layer 0
+    write_u16(fp, 1);  //tick jump = 1 (tick 0)
+    write_u16(fp, 1);  //layer jump = 1 (layer 0)
+    write_u8(fp, 0);   //instrument = 0 (harp)
+    write_u8(fp, 60);  //key = 60 (C4)
+    write_u8(fp, 100); //velocity
+    write_u8(fp, 100); //panning (center)
+    write_u16(fp, 0);  //pitch
+    write_u16(fp, 0);  //end of layers for this tick
     write_notes_end(fp);
 
-    /* Layers: 2 layers (v4: name + lock + volume + panning) */
+    //Layers: 2 layers (v4: name + lock + volume + panning)
     write_string(fp, "Layer 1");
-    write_u8(fp, 0);   /* lock */
-    write_u8(fp, 100); /* volume */
-    write_u8(fp, 100); /* panning */
+    write_u8(fp, 0);   //lock
+    write_u8(fp, 100); //volume
+    write_u8(fp, 100); //panning
     write_string(fp, "Layer 2");
-    write_u8(fp, 0);   /* lock */
-    write_u8(fp, 100); /* volume */
-    write_u8(fp, 100); /* panning */
+    write_u8(fp, 0);   //lock
+    write_u8(fp, 100); //volume
+    write_u8(fp, 100); //panning
 
-    /* Instruments: count=0 */
+    //Instruments: count=0
     write_u8(fp, 0);
 
     rewind(fp);
@@ -246,7 +245,7 @@ static int test_valid_v4(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "song should parse");
+    EXPECT(song != nullptr, "song should parse");
     EXPECT(song->version == 4, "version should be 4");
     EXPECT(arrlen(song->notes) == 1, "should have 1 note");
     EXPECT(song->notes[0].tick == 0, "note tick should be 0");
@@ -259,29 +258,29 @@ static int test_valid_v4(void) {
     return 1;
 }
 
-/* Test: Panning range mapping (0 -> -100, 100 -> 0, 200 -> 100) */
+//Test: Panning range mapping (0 -> -100, 100 -> 0, 200 -> 100)
 static int test_panning_mapping(void) {
-    /* Test left pan (0 -> -100) */
+    //Test left pan (0 -> -100)
     EXPECT((int8_t)(0 - 100) == -100, "panning 0 should map to -100");
     EXPECT((int8_t)(100 - 100) == 0, "panning 100 should map to 0");
     EXPECT((int8_t)(200 - 100) == 100, "panning 200 should map to 100");
     return 1;
 }
 
-/* Test: Unsupported version (v255) */
+//Test: Unsupported version (v255)
 static int test_unsupported_version(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    write_u16(fp, 0);  /* song_length = 0 */
-    write_u8(fp, 255); /* unsupported version */
+    write_u16(fp, 0);  //song_length = 0
+    write_u8(fp, 255); //unsupported version
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song should be NULL for v255");
+    EXPECT(song == nullptr, "song should be NULL for v255");
     EXPECT(err.code == NBS_ERROR_UNSUPPORTED_VERSION, "should be unsupported version error");
     EXPECT(err.section == NBS_SECTION_HEADER, "should fail in header section");
 
@@ -289,32 +288,32 @@ static int test_unsupported_version(void) {
     return 1;
 }
 
-/* Test: Version > 5 rejected */
+//Test: Version > 5 rejected
 static int test_version_6_rejected(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 0);
-    write_u8(fp, 6);  /* version 6 - not supported */
+    write_u8(fp, 6);  //version 6 - not supported
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song should be NULL for v6");
+    EXPECT(song == nullptr, "song should be NULL for v6");
     EXPECT(err.code == NBS_ERROR_UNSUPPORTED_VERSION, "should be unsupported version");
 
     fclose(fp);
     return 1;
 }
 
-/* Test: Truncated header */
+//Test: Truncated header
 static int test_truncated_header(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Write only 1 byte of header */
+    //Write only 1 byte of header
     write_u8(fp, 0);
 
     rewind(fp);
@@ -322,7 +321,7 @@ static int test_truncated_header(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song should be NULL");
+    EXPECT(song == nullptr, "song should be NULL");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated error");
     EXPECT(err.section == NBS_SECTION_HEADER, "should fail in header");
 
@@ -330,14 +329,14 @@ static int test_truncated_header(void) {
     return 1;
 }
 
-/* Test: Truncated notes section */
+//Test: Truncated notes section
 static int test_truncated_notes(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal valid header */
-    write_u16(fp, 1);  /* v0 */
-    write_u16(fp, 1);  /* layers */
+    //Minimal valid header
+    write_u16(fp, 1);  //v0
+    write_u16(fp, 1);  //layers
     write_string(fp, "Song");
     write_string(fp, "Author");
     write_string(fp, "Original");
@@ -353,16 +352,16 @@ static int test_truncated_notes(void) {
     write_u32(fp, 0);
     write_string(fp, "");
 
-    /* Start notes: tick jump but no layer data */
-    write_u16(fp, 1);  /* tick jump */
-    /* File ends here - missing layer jump and note data */
+    //Start notes: tick jump but no layer data
+    write_u16(fp, 1);  //tick jump
+    //File ends here - missing layer jump and note data
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song should be NULL");
+    EXPECT(song == nullptr, "song should be NULL");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated");
     EXPECT(err.section == NBS_SECTION_NOTES, "should fail in notes");
 
@@ -370,26 +369,26 @@ static int test_truncated_notes(void) {
     return 1;
 }
 
-/* Test: String length at limit succeeds */
+//Test: String length at limit succeeds
 static int test_string_at_limit(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal header */
+    //Minimal header
     write_u16(fp, 1);
     write_u16(fp, 1);
 
-    /* String at exactly NBS_MAX_STRING_LEN */
+    //String at exactly NBS_MAX_STRING_LEN
     write_u32(fp, NBS_MAX_STRING_LEN);
-    /* Write NBS_MAX_STRING_LEN bytes */
+    //Write NBS_MAX_STRING_LEN bytes
     for (size_t i = 0; i < NBS_MAX_STRING_LEN; i++) {
         write_u8(fp, 'A');
     }
 
-    /* Complete with minimal valid data - all empty strings */
-    write_u32(fp, 0); /* author length 0 */
-    write_u32(fp, 0); /* original length 0 */
-    write_u32(fp, 0); /* desc length 0 */
+    //Complete with minimal valid data - all empty strings
+    write_u32(fp, 0); //author length 0
+    write_u32(fp, 0); //original length 0
+    write_u32(fp, 0); //desc length 0
     write_u16(fp, 1000);
     write_u8(fp, 0);
     write_u8(fp, 0);
@@ -399,39 +398,39 @@ static int test_string_at_limit(void) {
     write_u32(fp, 0);
     write_u32(fp, 0);
     write_u32(fp, 0);
-    write_u32(fp, 0); /* origin string length 0 */
+    write_u32(fp, 0); //origin string length 0
 
     write_notes_end(fp);
 
-    /* Layer: empty name + volume */
-    write_u32(fp, 0); /* name length 0 */
-    write_u8(fp, 0);  /* volume */
-    /* v0 has no panning */
+    //Layer: empty name + volume
+    write_u32(fp, 0); //name length 0
+    write_u8(fp, 0);  //volume
+    //v0 has no panning
 
-    write_u8(fp, 0); /* instruments */
+    write_u8(fp, 0); //instruments
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    /* Should succeed - string at limit is acceptable */
-    EXPECT(song != NULL, "song at string limit should parse");
+    //Should succeed - string at limit is acceptable
+    EXPECT(song != nullptr, "song at string limit should parse");
 
     nbs_free(song);
     fclose(fp);
     return 1;
 }
 
-/* Test: String length exceeding limit fails */
+//Test: String length exceeding limit fails
 static int test_string_exceeds_limit(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 1);
     write_u16(fp, 1);
 
-    /* String length = NBS_MAX_STRING_LEN + 1 */
+    //String length = NBS_MAX_STRING_LEN + 1
     write_u32(fp, NBS_MAX_STRING_LEN + 1);
 
     rewind(fp);
@@ -439,7 +438,7 @@ static int test_string_exceeds_limit(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song should be NULL when string exceeds limit");
+    EXPECT(song == nullptr, "song should be NULL when string exceeds limit");
     EXPECT(err.code == NBS_ERROR_TRUNCATED || err.code == NBS_ERROR_LIMIT_EXCEEDED,
            "should fail with truncated or limit exceeded");
 
@@ -447,12 +446,12 @@ static int test_string_exceeds_limit(void) {
     return 1;
 }
 
-/* Test: Multiple ticks with layer reset */
+//Test: Multiple ticks with layer reset
 static int test_layer_reset_per_tick(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Header */
+    //Header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -476,46 +475,46 @@ static int test_layer_reset_per_tick(void) {
     write_u8(fp, 0);
     write_u16(fp, 0);
 
-    /* Notes: tick 0, layer 0 */
-    write_u16(fp, 1);  /* tick 0 */
-    write_u16(fp, 1);  /* layer 0 */
-    write_u8(fp, 0);   /* instrument */
-    write_u8(fp, 60);  /* key */
-    write_u8(fp, 100); /* velocity */
-    write_u8(fp, 100); /* panning */
-    write_u16(fp, 0);  /* pitch */
-    write_u16(fp, 0);  /* end of layers for this tick */
+    //Notes: tick 0, layer 0
+    write_u16(fp, 1);  //tick 0
+    write_u16(fp, 1);  //layer 0
+    write_u8(fp, 0);   //instrument
+    write_u8(fp, 60);  //key
+    write_u8(fp, 100); //velocity
+    write_u8(fp, 100); //panning
+    write_u16(fp, 0);  //pitch
+    write_u16(fp, 0);  //end of layers for this tick
 
-    /* Notes: tick 1, layer 0 (layer should reset) */
-    write_u16(fp, 1);  /* tick jump = 1 (tick 1) */
-    write_u16(fp, 1);  /* layer jump = 1 (layer 0) */
-    write_u8(fp, 1);   /* instrument = 1 */
-    write_u8(fp, 64);  /* key */
-    write_u8(fp, 100); /* velocity */
-    write_u8(fp, 100); /* panning */
-    write_u16(fp, 0);  /* pitch */
-    write_u16(fp, 0);  /* end of layers for this tick */
+    //Notes: tick 1, layer 0 (layer should reset)
+    write_u16(fp, 1);  //tick jump = 1 (tick 1)
+    write_u16(fp, 1);  //layer jump = 1 (layer 0)
+    write_u8(fp, 1);   //instrument = 1
+    write_u8(fp, 64);  //key
+    write_u8(fp, 100); //velocity
+    write_u8(fp, 100); //panning
+    write_u16(fp, 0);  //pitch
+    write_u16(fp, 0);  //end of layers for this tick
 
     write_notes_end(fp);
 
-    /* Layers (v4: name + lock + volume + panning) */
+    //Layers (v4: name + lock + volume + panning)
     write_string(fp, "L1");
-    write_u8(fp, 0);   /* lock */
-    write_u8(fp, 100); /* volume */
-    write_u8(fp, 100); /* panning */
+    write_u8(fp, 0);   //lock
+    write_u8(fp, 100); //volume
+    write_u8(fp, 100); //panning
     write_string(fp, "L2");
-    write_u8(fp, 0);   /* lock */
-    write_u8(fp, 100); /* volume */
-    write_u8(fp, 100); /* panning */
+    write_u8(fp, 0);   //lock
+    write_u8(fp, 100); //volume
+    write_u8(fp, 100); //panning
 
-    write_u8(fp, 0); /* instruments */
+    write_u8(fp, 0); //instruments
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "song should parse");
+    EXPECT(song != nullptr, "song should parse");
     EXPECT(arrlen(song->notes) == 2, "should have 2 notes");
     EXPECT(song->notes[0].tick == 0, "first note tick 0");
     EXPECT(song->notes[0].layer == 0, "first note layer 0");
@@ -527,10 +526,10 @@ static int test_layer_reset_per_tick(void) {
     return 1;
 }
 
-/* Test: Note count limit enforced */
+//Test: Note count limit enforced
 static int test_note_limit_exceeded(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 0); write_u8(fp, 4); write_u8(fp, 16);
     write_u16(fp, 1); write_u16(fp, 1000);
@@ -541,17 +540,17 @@ static int test_note_limit_exceeded(void) {
     write_string(fp, "");
     write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
 
-    /* One tick contains 1000 compact notes.  Write exactly the limit, then
-     * one more note on a new tick so the parser must exercise the guard. */
+    //One tick contains 1000 compact notes.  Write exactly the limit, then
+    // one more note on a new tick so the parser must exercise the guard.
     uint8_t tick_notes[1000 * 8];
     for (size_t i = 0; i < 1000; i++) {
         uint8_t *note = &tick_notes[i * 8];
-        note[0] = 1; note[1] = 0;  /* layer jump */
-        note[2] = 0;               /* instrument */
-        note[3] = 45;              /* key */
-        note[4] = 100;             /* velocity */
-        note[5] = 100;             /* panning */
-        note[6] = 0; note[7] = 0;  /* pitch */
+        note[0] = 1; note[1] = 0;  //layer jump
+        note[2] = 0;               //instrument
+        note[3] = 45;              //key
+        note[4] = 100;             //velocity
+        note[5] = 100;             //panning
+        note[6] = 0; note[7] = 0;  //pitch
     }
 
     uint32_t full_ticks = NBS_MAX_NOTES / 1000U;
@@ -575,7 +574,7 @@ static int test_note_limit_exceeded(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "note count above limit should fail");
+    EXPECT(song == nullptr, "note count above limit should fail");
     EXPECT(err.code == NBS_ERROR_LIMIT_EXCEEDED, "should report limit exceeded");
     EXPECT(err.section == NBS_SECTION_NOTES, "should fail in notes section");
 
@@ -583,52 +582,52 @@ static int test_note_limit_exceeded(void) {
     return 1;
 }
 
-/* Test: nbs_free handles NULL safely */
+//Test: nbs_free handles nullptr safely
 static int test_nbs_free_null_safe(void) {
-    nbs_free(NULL);  /* Should not crash */
+    nbs_free(nullptr);  //Should not crash
     return 1;
 }
 
-/* Test: nbs_free handles partially constructed song */
+//Test: nbs_free handles partially constructed song
 static int test_nbs_free_partial(void) {
     struct nbs_song *song = calloc(1, sizeof(struct nbs_song));
-    EXPECT(song != NULL, "alloc");
+    EXPECT(song != nullptr, "alloc");
 
-    /* Partially initialize: only song_name */
+    //Partially initialize: only song_name
 #ifdef _WIN32
     song->song_name = _strdup("Test");
 #else
     song->song_name = strdup("Test");
 #endif
 
-    nbs_free(song);  /* Should free song_name and song without crash */
+    nbs_free(song);  //Should free song_name and song without crash
     return 1;
 }
 
-/* Test: Error string helpers */
+//Test: Error string helpers
 static int test_error_strings(void) {
-    EXPECT(nbs_error_string(NBS_ERROR_NONE) != NULL, "error string for NONE");
-    EXPECT(nbs_error_string(NBS_ERROR_TRUNCATED) != NULL, "error string for TRUNCATED");
-    EXPECT(nbs_error_string(NBS_ERROR_UNSUPPORTED_VERSION) != NULL, "error string for UNSUPPORTED_VERSION");
-    EXPECT(nbs_error_string(999) != NULL, "error string for unknown");
+    EXPECT(nbs_error_string(NBS_ERROR_NONE) != nullptr, "error string for NONE");
+    EXPECT(nbs_error_string(NBS_ERROR_TRUNCATED) != nullptr, "error string for TRUNCATED");
+    EXPECT(nbs_error_string(NBS_ERROR_UNSUPPORTED_VERSION) != nullptr, "error string for UNSUPPORTED_VERSION");
+    EXPECT(nbs_error_string(999) != nullptr, "error string for unknown");
 
-    EXPECT(nbs_section_string(NBS_SECTION_NONE) != NULL, "section string for NONE");
-    EXPECT(nbs_section_string(NBS_SECTION_HEADER) != NULL, "section string for HEADER");
-    EXPECT(nbs_section_string(NBS_SECTION_NOTES) != NULL, "section string for NOTES");
-    EXPECT(nbs_section_string(999) != NULL, "section string for unknown");
+    EXPECT(nbs_section_string(NBS_SECTION_NONE) != nullptr, "section string for NONE");
+    EXPECT(nbs_section_string(NBS_SECTION_HEADER) != nullptr, "section string for HEADER");
+    EXPECT(nbs_section_string(NBS_SECTION_NOTES) != nullptr, "section string for NOTES");
+    EXPECT(nbs_section_string(999) != nullptr, "section string for unknown");
 
     return 1;
 }
 
-/* Test: Layer count limit in header */
+//Test: Layer count limit in header
 static int test_layer_limit_header(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 1);
-    write_u16(fp, NBS_MAX_LAYERS + 1);  /* Exceeds limit */
+    write_u16(fp, NBS_MAX_LAYERS + 1);  //Exceeds limit
 
-    /* Minimal strings */
+    //Minimal strings
     write_string(fp, "S");
     write_string(fp, "A");
     write_string(fp, "O");
@@ -646,14 +645,14 @@ static int test_layer_limit_header(void) {
 
     write_notes_end(fp);
 
-    /* Don't write layers - should fail before that */
+    //Don't write layers - should fail before that
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "song with too many layers should fail");
+    EXPECT(song == nullptr, "song with too many layers should fail");
     EXPECT(err.code == NBS_ERROR_LIMIT_EXCEEDED, "should be limit exceeded");
     EXPECT(err.section == NBS_SECTION_HEADER, "should fail in header");
 
@@ -661,12 +660,12 @@ static int test_layer_limit_header(void) {
     return 1;
 }
 
-/* Test: Tick boundary at 65534 (max single jump) */
+//Test: Tick boundary at 65534 (max single jump)
 static int test_tick_65535(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* v4 header */
+    //v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -684,18 +683,18 @@ static int test_tick_65535(void) {
     write_string(fp, "");
     write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
 
-    /* Note at tick 65534: jump = 65535 (max uint16) */
-    write_u16(fp, 65535);  /* tick jump */
-    write_u16(fp, 1);      /* layer jump */
-    write_u8(fp, 0);       /* instrument */
-    write_u8(fp, 60);      /* key */
-    write_u8(fp, 100);     /* velocity */
-    write_u8(fp, 100);     /* panning */
-    write_u16(fp, 0);      /* pitch */
-    write_u16(fp, 0);      /* end of layers */
+    //Note at tick 65534: jump = 65535 (max uint16)
+    write_u16(fp, 65535);  //tick jump
+    write_u16(fp, 1);      //layer jump
+    write_u8(fp, 0);       //instrument
+    write_u8(fp, 60);      //key
+    write_u8(fp, 100);     //velocity
+    write_u8(fp, 100);     //panning
+    write_u16(fp, 0);      //pitch
+    write_u16(fp, 0);      //end of layers
     write_notes_end(fp);
 
-    /* Layers */
+    //Layers
     write_string(fp, "L");
     write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
 
@@ -705,7 +704,7 @@ static int test_tick_65535(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "tick 65534 should parse");
+    EXPECT(song != nullptr, "tick 65534 should parse");
     EXPECT(arrlen(song->notes) == 1, "should have 1 note");
     EXPECT(song->notes[0].tick == 65534, "tick should be 65534");
 
@@ -714,12 +713,12 @@ static int test_tick_65535(void) {
     return 1;
 }
 
-/* Test: Tick at 65536 using multiple jumps */
+//Test: Tick at 65536 using multiple jumps
 static int test_tick_65536(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* v4 header */
+    //v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -732,13 +731,13 @@ static int test_tick_65536(void) {
     write_string(fp, "");
     write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
 
-    /* Tick 65534 (jump=65535), then jump=2 to reach 65536 */
-    write_u16(fp, 65535);  /* tick 65534 */
+    //Tick 65534 (jump=65535), then jump=2 to reach 65536
+    write_u16(fp, 65535);  //tick 65534
     write_u16(fp, 1);
     write_u8(fp, 0); write_u8(fp, 60); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
     write_u16(fp, 0);
 
-    write_u16(fp, 2);    /* jump 2 -> tick 65536 */
+    write_u16(fp, 2);    //jump 2 -> tick 65536
     write_u16(fp, 1);
     write_u8(fp, 0); write_u8(fp, 64); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
     write_u16(fp, 0);
@@ -752,7 +751,7 @@ static int test_tick_65536(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "tick 65536 should parse");
+    EXPECT(song != nullptr, "tick 65536 should parse");
     EXPECT(arrlen(song->notes) == 2, "should have 2 notes");
     EXPECT(song->notes[0].tick == 65534, "first note tick should be 65534");
     EXPECT(song->notes[1].tick == 65536, "second note tick should be 65536");
@@ -762,12 +761,12 @@ static int test_tick_65536(void) {
     return 1;
 }
 
-/* Test: Tick at 100000 using multiple jumps */
+//Test: Tick at 100000 using multiple jumps
 static int test_tick_100000(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* v4 header */
+    //v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -780,13 +779,13 @@ static int test_tick_100000(void) {
     write_string(fp, "");
     write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
 
-    /* Tick 65534 (jump=65535), then jump=34466 to reach 100000 */
-    write_u16(fp, 65535);  /* tick 65534 */
+    //Tick 65534 (jump=65535), then jump=34466 to reach 100000
+    write_u16(fp, 65535);  //tick 65534
     write_u16(fp, 1);
     write_u8(fp, 0); write_u8(fp, 60); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
     write_u16(fp, 0);
 
-    write_u16(fp, 34466);  /* 65534 + 34466 = 100000 */
+    write_u16(fp, 34466);  //65534 + 34466 = 100000
     write_u16(fp, 1);
     write_u8(fp, 0); write_u8(fp, 64); write_u8(fp, 100); write_u8(fp, 100); write_u16(fp, 0);
     write_u16(fp, 0);
@@ -800,7 +799,7 @@ static int test_tick_100000(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "tick 100000 should parse");
+    EXPECT(song != nullptr, "tick 100000 should parse");
     EXPECT(arrlen(song->notes) == 2, "should have 2 notes");
     EXPECT(song->notes[0].tick == 65534, "first note tick should be 65534");
     EXPECT(song->notes[1].tick == 100000, "second note tick should be 100000");
@@ -810,17 +809,17 @@ static int test_tick_100000(void) {
     return 1;
 }
 
-/* Test: Custom instrument returns harp */
+//Test: Custom instrument returns harp
 static int test_custom_instrument_harp(void) {
-    /* This test is in music_player.c layer, not parser layer.
-     * Parser correctly passes through instrument number.
-     * The conversion to harp happens in song_cache_parse.
-     * We verify the parser accepts instrument > 15.
-     */
+    //This test is in music_player.c layer, not parser layer.
+    // Parser correctly passes through instrument number.
+    // The conversion to harp happens in song_cache_parse.
+    // We verify the parser accepts instrument > 15.
+    //
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* v4 header */
+    //v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -833,10 +832,10 @@ static int test_custom_instrument_harp(void) {
     write_string(fp, "");
     write_u8(fp, 0); write_u8(fp, 0); write_u16(fp, 0);
 
-    /* Note with instrument = 16 (custom) */
+    //Note with instrument = 16 (custom)
     write_u16(fp, 1);
     write_u16(fp, 1);
-    write_u8(fp, 16);      /* custom instrument */
+    write_u8(fp, 16);      //custom instrument
     write_u8(fp, 60);
     write_u8(fp, 100);
     write_u8(fp, 100);
@@ -852,7 +851,7 @@ static int test_custom_instrument_harp(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "custom instrument should parse");
+    EXPECT(song != nullptr, "custom instrument should parse");
     EXPECT(song->notes[0].instrument == 16, "parser should preserve instrument=16");
 
     nbs_free(song);
@@ -860,9 +859,9 @@ static int test_custom_instrument_harp(void) {
     return 1;
 }
 
-/* Test: Panning boundary conversion */
+//Test: Panning boundary conversion
 static int test_panning_boundary(void) {
-    /* Test raw values 0, 100, 200 map to -100, 0, 100 */
+    //Test raw values 0, 100, 200 map to -100, 0, 100
     int8_t p0 = (int8_t)(0 - 100);
     int8_t p100 = (int8_t)(100 - 100);
     int8_t p200 = (int8_t)(200 - 100);
@@ -874,7 +873,7 @@ static int test_panning_boundary(void) {
     return 1;
 }
 
-/* Test: Out-of-range note and layer values are rejected. */
+//Test: Out-of-range note and layer values are rejected.
 static int test_invalid_field_values(void) {
     static const struct {
         uint8_t key;
@@ -891,14 +890,14 @@ static int test_invalid_field_values(void) {
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         FILE *fp = tmpfile();
-        EXPECT(fp != NULL, "tmpfile");
+        EXPECT(fp != nullptr, "tmpfile");
         write_v4_value_test(fp, cases[i].key, cases[i].velocity,
                             cases[i].note_panning, cases[i].layer_volume);
         rewind(fp);
 
         struct nbs_error_info err;
         struct nbs_song *song = nbs_parse(fp, &err);
-        EXPECT(song == NULL, "invalid field should fail parsing");
+        EXPECT(song == nullptr, "invalid field should fail parsing");
         EXPECT(err.code == NBS_ERROR_INVALID_VALUE, "should report invalid value");
         EXPECT(err.section == cases[i].section, "should report the failing section");
         fclose(fp);
@@ -906,14 +905,14 @@ static int test_invalid_field_values(void) {
     return 1;
 }
 
-/* Test: Valid NBS file without instruments section (legally omitted) */
+//Test: Valid NBS file without instruments section (legally omitted)
 static int test_valid_no_instruments(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal v0 header */
-    write_u16(fp, 1);  /* v0 */
-    write_u16(fp, 0);  /* song_layers = 0 */
+    //Minimal v0 header
+    write_u16(fp, 1);  //v0
+    write_u16(fp, 0);  //song_layers = 0
     write_string(fp, "Song");
     write_string(fp, "Author");
     write_string(fp, "Original");
@@ -925,11 +924,11 @@ static int test_valid_no_instruments(void) {
     write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
     write_string(fp, "");
 
-    /* Notes section: empty */
+    //Notes section: empty
     write_notes_end(fp);
 
-    /* Layers: none (song_layers = 0) */
-    /* Instruments: section omitted entirely - file ends here */
+    //Layers: none (song_layers = 0)
+    //Instruments: section omitted entirely - file ends here
 
     rewind(fp);
 
@@ -937,12 +936,12 @@ static int test_valid_no_instruments(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    if (song == NULL) {
+    if (song == nullptr) {
         fprintf(stderr, "    debug: code=%d section=%d offset=%lld\n",
                 err.code, err.section, (long long)err.file_offset);
     }
 
-    EXPECT(song != NULL, "song should parse without instruments section");
+    EXPECT(song != nullptr, "song should parse without instruments section");
     EXPECT(song->version == 0, "version should be 0");
     EXPECT(arrlen(song->instruments) == 0, "should have 0 instruments");
 
@@ -951,14 +950,14 @@ static int test_valid_no_instruments(void) {
     return 1;
 }
 
-/* Test: Layers and instruments sections may both be omitted at EOF. */
+//Test: Layers and instruments sections may both be omitted at EOF.
 static int test_valid_no_layers(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* The header can still report layers even when the optional section is absent. */
-    write_u16(fp, 1);  /* v0 */
-    write_u16(fp, 1);  /* song_layers */
+    //The header can still report layers even when the optional section is absent.
+    write_u16(fp, 1);  //v0
+    write_u16(fp, 1);  //song_layers
     write_string(fp, "Song");
     write_string(fp, "Author");
     write_string(fp, "Original");
@@ -970,14 +969,14 @@ static int test_valid_no_layers(void) {
     write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
     write_string(fp, "");
     write_notes_end(fp);
-    /* Clean EOF: layers and custom instruments are both omitted. */
+    //Clean EOF: layers and custom instruments are both omitted.
 
     rewind(fp);
 
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song != NULL, "song should parse without optional sections");
+    EXPECT(song != nullptr, "song should parse without optional sections");
     EXPECT(err.code == NBS_ERROR_NONE, "error should remain clear");
     EXPECT(arrlen(song->layers) == 0, "layers should be empty");
     EXPECT(arrlen(song->instruments) == 0, "instruments should be empty");
@@ -987,17 +986,17 @@ static int test_valid_no_layers(void) {
     return 1;
 }
 
-/* Test: Layer truncated mid-parse - name succeeds but volume fails */
+//Test: Layer truncated mid-parse - name succeeds but volume fails
 static int test_layer_truncated(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal v4 header with 1 layer */
+    //Minimal v4 header with 1 layer
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
     write_u16(fp, 100);
-    write_u16(fp, 1);  /* 1 layer */
+    write_u16(fp, 1);  //1 layer
     write_string(fp, "Song"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
     write_u16(fp, 1000);
     write_u8(fp, 0); write_u8(fp, 0); write_u8(fp, 4);
@@ -1007,9 +1006,9 @@ static int test_layer_truncated(void) {
 
     write_notes_end(fp);
 
-    /* Layer: name only, then EOF */
+    //Layer: name only, then EOF
     write_string(fp, "Layer 1");
-    /* Missing: lock, volume, panning */
+    //Missing: lock, volume, panning
 
     rewind(fp);
 
@@ -1017,7 +1016,7 @@ static int test_layer_truncated(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "truncated layer should fail");
+    EXPECT(song == nullptr, "truncated layer should fail");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated error");
     EXPECT(err.section == NBS_SECTION_LAYERS, "should fail in layers section");
 
@@ -1025,12 +1024,12 @@ static int test_layer_truncated(void) {
     return 1;
 }
 
-/* Test: Instrument truncated - name succeeds, sound_file fails */
+//Test: Instrument truncated - name succeeds, sound_file fails
 static int test_instrument_truncated_name_ok_soundfile_eof(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal v4 header */
+    //Minimal v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -1045,14 +1044,14 @@ static int test_instrument_truncated_name_ok_soundfile_eof(void) {
 
     write_notes_end(fp);
 
-    /* 1 layer (minimal v4) */
+    //1 layer (minimal v4)
     write_string(fp, "L");
     write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
 
-    /* Instrument: count=1, name only, then EOF */
+    //Instrument: count=1, name only, then EOF
     write_u8(fp, 1);
     write_string(fp, "Instr1");
-    /* Missing: sound_file, pitch, press_key */
+    //Missing: sound_file, pitch, press_key
 
     rewind(fp);
 
@@ -1060,7 +1059,7 @@ static int test_instrument_truncated_name_ok_soundfile_eof(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "truncated instrument should fail");
+    EXPECT(song == nullptr, "truncated instrument should fail");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated error");
     EXPECT(err.section == NBS_SECTION_INSTRUMENTS, "should fail in instruments section");
 
@@ -1068,10 +1067,10 @@ static int test_instrument_truncated_name_ok_soundfile_eof(void) {
     return 1;
 }
 
-/* Test: Instrument truncated - strings ok, pitch fails */
+//Test: Instrument truncated - strings ok, pitch fails
 static int test_instrument_truncated_strings_ok_pitch_eof(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 0);
     write_u8(fp, 4);
@@ -1090,11 +1089,11 @@ static int test_instrument_truncated_strings_ok_pitch_eof(void) {
     write_string(fp, "L");
     write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
 
-    /* Instrument: count=1, name+sound_file, then EOF before pitch */
+    //Instrument: count=1, name+sound_file, then EOF before pitch
     write_u8(fp, 1);
     write_string(fp, "Instr1");
     write_string(fp, "sound.wav");
-    /* Missing: pitch, press_key */
+    //Missing: pitch, press_key
 
     rewind(fp);
 
@@ -1102,7 +1101,7 @@ static int test_instrument_truncated_strings_ok_pitch_eof(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "truncated instrument (pitch) should fail");
+    EXPECT(song == nullptr, "truncated instrument (pitch) should fail");
     EXPECT(err.code == NBS_ERROR_TRUNCATED, "should be truncated error");
     EXPECT(err.section == NBS_SECTION_INSTRUMENTS, "should fail in instruments section");
 
@@ -1110,12 +1109,12 @@ static int test_instrument_truncated_strings_ok_pitch_eof(void) {
     return 1;
 }
 
-/* Test: nbs_parse with out_error == NULL should not crash */
+//Test: nbs_parse with out_error == nullptr should not crash
 static int test_nbs_parse_null_error(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Valid minimal v0 */
+    //Valid minimal v0
     write_u16(fp, 1);
     write_u16(fp, 0);
     write_string(fp, "S"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
@@ -1127,39 +1126,39 @@ static int test_nbs_parse_null_error(void) {
 
     rewind(fp);
 
-    struct nbs_song *song = nbs_parse(fp, NULL);
+    struct nbs_song *song = nbs_parse(fp, nullptr);
 
-    EXPECT(song != NULL, "nbs_parse with NULL error should succeed");
+    EXPECT(song != nullptr, "nbs_parse with NULL error should succeed");
 
     nbs_free(song);
     fclose(fp);
     return 1;
 }
 
-/* Test: nbs_parse with fp == NULL should return invalid argument */
+//Test: nbs_parse with fp == nullptr should return invalid argument
 static int test_nbs_parse_null_fp(void) {
     struct nbs_error_info err;
     memset(&err, 0, sizeof(err));
 
-    struct nbs_song *song = nbs_parse(NULL, &err);
+    struct nbs_song *song = nbs_parse(nullptr, &err);
 
-    EXPECT(song == NULL, "nbs_parse with NULL fp should return NULL");
+    EXPECT(song == nullptr, "nbs_parse with NULL fp should return NULL");
     EXPECT(err.code == NBS_ERROR_INVALID_ARGUMENT, "should be invalid argument error");
     EXPECT(err.section == NBS_SECTION_NONE, "section should be NONE");
 
     return 1;
 }
 
-/* Test: tempo == 0 should return invalid value error */
+//Test: tempo == 0 should return invalid value error
 static int test_tempo_zero(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal v0 header with tempo=0 */
+    //Minimal v0 header with tempo=0
     write_u16(fp, 1);
     write_u16(fp, 0);
     write_string(fp, "S"); write_string(fp, "A"); write_string(fp, "O"); write_string(fp, "D");
-    write_u16(fp, 0);  /* tempo = 0 - invalid! */
+    write_u16(fp, 0);  //tempo = 0 - invalid!
     write_u8(fp, 0); write_u8(fp, 0); write_u8(fp, 4);
     write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0); write_u32(fp, 0);
     write_string(fp, "");
@@ -1171,7 +1170,7 @@ static int test_tempo_zero(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "tempo=0 should fail parsing");
+    EXPECT(song == nullptr, "tempo=0 should fail parsing");
     EXPECT(err.code == NBS_ERROR_INVALID_VALUE, "should report invalid value");
     EXPECT(err.section == NBS_SECTION_HEADER, "should fail in header section");
 
@@ -1179,13 +1178,13 @@ static int test_tempo_zero(void) {
     return 1;
 }
 
-/* Test: unsupported version should report actual version */
+//Test: unsupported version should report actual version
 static int test_unsupported_version_reports_actual(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 0);
-    write_u8(fp, 255);  /* unsupported version */
+    write_u8(fp, 255);  //unsupported version
 
     rewind(fp);
 
@@ -1193,7 +1192,7 @@ static int test_unsupported_version_reports_actual(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "v255 should fail");
+    EXPECT(song == nullptr, "v255 should fail");
     EXPECT(err.code == NBS_ERROR_UNSUPPORTED_VERSION, "should be unsupported version");
     EXPECT(err.actual_version == 255, "should report actual version 255");
 
@@ -1201,12 +1200,12 @@ static int test_unsupported_version_reports_actual(void) {
     return 1;
 }
 
-/* Test: instrument count at limit (240) should succeed */
+//Test: instrument count at limit (240) should succeed
 static int test_instrument_limit_boundary(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
-    /* Minimal v4 header */
+    //Minimal v4 header
     write_u16(fp, 0);
     write_u8(fp, 4);
     write_u8(fp, 10);
@@ -1224,7 +1223,7 @@ static int test_instrument_limit_boundary(void) {
     write_string(fp, "L");
     write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
 
-    /* 240 instruments (at limit) */
+    //240 instruments (at limit)
     write_u8(fp, 240);
     for (int i = 0; i < 240; i++) {
         write_string(fp, "I");
@@ -1239,10 +1238,10 @@ static int test_instrument_limit_boundary(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    if (song == NULL) {
+    if (song == nullptr) {
         fprintf(stderr, "    debug: code=%d section=%d\n", err.code, err.section);
     }
-    EXPECT(song != NULL, "240 instruments should succeed");
+    EXPECT(song != nullptr, "240 instruments should succeed");
     EXPECT(arrlen(song->instruments) == 240, "should have 240 instruments");
 
     nbs_free(song);
@@ -1250,10 +1249,10 @@ static int test_instrument_limit_boundary(void) {
     return 1;
 }
 
-/* Test: instrument count exceeding limit (241) should fail */
+//Test: instrument count exceeding limit (241) should fail
 static int test_instrument_limit_exceeded(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
 
     write_u16(fp, 0);
     write_u8(fp, 4);
@@ -1272,7 +1271,7 @@ static int test_instrument_limit_exceeded(void) {
     write_string(fp, "L");
     write_u8(fp, 0); write_u8(fp, 100); write_u8(fp, 100);
 
-    /* 241 instruments (exceeds limit) */
+    //241 instruments (exceeds limit)
     write_u8(fp, 241);
     for (int i = 0; i < 241; i++) {
         write_string(fp, "I");
@@ -1287,17 +1286,17 @@ static int test_instrument_limit_exceeded(void) {
     memset(&err, 0, sizeof(err));
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "241 instruments should fail");
+    EXPECT(song == nullptr, "241 instruments should fail");
     EXPECT(err.code == NBS_ERROR_LIMIT_EXCEEDED, "should be limit exceeded");
 
     fclose(fp);
     return 1;
 }
 
-/* Test: file size exceeding limit should fail */
+//Test: file size exceeding limit should fail
 static int test_file_size_limit(void) {
     FILE *fp = tmpfile();
-    EXPECT(fp != NULL, "tmpfile");
+    EXPECT(fp != nullptr, "tmpfile");
     EXPECT(fseek(fp, (long)NBS_MAX_FILE_SIZE, SEEK_SET) == 0, "seek to size limit");
     EXPECT(fputc(0, fp) != EOF, "extend file beyond size limit");
     rewind(fp);
@@ -1305,7 +1304,7 @@ static int test_file_size_limit(void) {
     struct nbs_error_info err;
     struct nbs_song *song = nbs_parse(fp, &err);
 
-    EXPECT(song == NULL, "oversized file should fail parsing");
+    EXPECT(song == nullptr, "oversized file should fail parsing");
     EXPECT(err.code == NBS_ERROR_LIMIT_EXCEEDED, "should report limit exceeded");
     EXPECT(err.section == NBS_SECTION_NONE, "size check should fail before parsing");
     EXPECT(err.file_offset == (int64_t)NBS_MAX_FILE_SIZE + 1, "should report actual file size");

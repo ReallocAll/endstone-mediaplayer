@@ -7,10 +7,20 @@
 #include "mediaplayer/video/video_policy.h"
 #include "mediaplayer/video/video_preferences.h"
 #include "mediaplayer/video/video_session.h"
+#include "mediaplayer/image/mps_catalog.h"
+#include "mediaplayer/image/mps_source.h"
 #include "mediaplayer/map/map_render.h"
 #include "mediaplayer/music/music_cache.h"
 #include "mediaplayer/music/music_catalog.h"
 #include "mediaplayer/music/screen_audio.h"
+
+#define MPV_RESEND_JOBS_MAX SCREEN_REGISTRY_MAX
+
+struct video_resend_job {
+    uint64_t screen_runtime_id;
+    uint64_t attachment_id;
+    struct presenter_resident_cursor cursor;
+};
 
 struct video_online_player {
     void *player;
@@ -18,13 +28,17 @@ struct video_online_player {
     bool public_media_enabled;
     struct mpv_public_snapshot snapshot;
     struct mpv_public_membership membership;
+    struct video_resend_job resend_jobs[MPV_RESEND_JOBS_MAX];
+    int resend_count;
 };
 
 // Central video plugin context owned by plugin.c.
 struct video_ctx {
     struct screen_registry registry;
     struct video_catalog catalog;
+    struct mps_catalog image_catalog;
     struct video_engine engine;
+    struct mps_source_engine image_engine;
     struct screen_audio_engine audio;
     struct map_render_ctx render;
     struct music_catalog *music_catalog;

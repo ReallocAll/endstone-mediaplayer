@@ -4,6 +4,7 @@
 #endif
 
 #include "mediaplayer/video/video_format.h"
+#include "mediaplayer/endstone_api.h"
 #include "mediaplayer/screen/screen_geometry.h"
 
 #include <limits.h>
@@ -14,10 +15,10 @@
 
 #if !defined(_WIN32)
 #include <sys/types.h>
-_Static_assert(sizeof(off_t) >= 8, "MCV reader requires 64-bit off_t");
+static_assert(sizeof(off_t) >= 8, "MCV reader requires 64-bit off_t");
 #endif
 
-_Static_assert(SCREEN_TILE_SIZE == 128, "MCV pixel math assumes 128px tiles");
+static_assert(SCREEN_TILE_SIZE == 128, "MCV pixel math assumes 128px tiles");
 
 static uint16_t read_u16(const uint8_t *p)
 {
@@ -107,7 +108,7 @@ enum mcv_error mcv_open(const char *path, struct mcv_file *out)
     memset(out, 0, sizeof(*out));
     if (!path || !path[0]) return MCV_ERR_IO;
 
-    out->fp = fopen(path, "rb");
+    out->fp = fopen_utf8(path, "rb");
     if (!out->fp) return MCV_ERR_IO;
     out->stream_pos = MCV_STREAM_POS_UNKNOWN;
     if (file_size_u64(out->fp, &out->file_size) != 0)
@@ -359,6 +360,11 @@ enum mcv_error mcv_read_frame(struct mcv_file *f, uint32_t frame_idx,
     uint8_t *stored = f->stored_scratch;
     if (!stream_read(f, stored, stored_size))
         return MCV_ERR_DATA_TRUNCATED;
+
+    uint32_t stored_crc =
+        (uint32_t)mz_crc32(MZ_CRC32_INIT, stored, stored_size);
+    if (stored_crc != ref->crc32)
+        return MCV_ERR_FRAME_CRC;
 
     // mz_uncompress validates the zlib stream checksum.
     mz_ulong destination_size = (mz_ulong)f->raw_frame_size;

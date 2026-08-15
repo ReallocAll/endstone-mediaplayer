@@ -1,14 +1,23 @@
-/*
- * Unit tests for the video screen system.
- * Covers: screen geometry, video format, playback clock,
- * screen registry, persistence, and map color.
- */
+//
+// Unit tests for the video screen system.
+// Covers: screen geometry, video format, playback clock,
+// screen registry, persistence, and map color.
+//
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
 #include <limits.h>
+#include <errno.h>
+
+#if defined(_WIN32)
+#include <direct.h>
+#include <process.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "mediaplayer/screen/screen_geometry.h"
 #include "mediaplayer/screen/screen_registry.h"
@@ -18,6 +27,8 @@
 #include "mediaplayer/video/video_policy.h"
 #include "mediaplayer/video/video_preferences.h"
 #include "mediaplayer/video/video_session.h"
+#include "mediaplayer/image/mps_catalog.h"
+#include "mediaplayer/image/mps_source.h"
 #include "mediaplayer/music/music_cache.h"
 #include "mediaplayer/music/screen_audio.h"
 #include "mediaplayer/map/map_render.h"
@@ -25,8 +36,11 @@
 #include "mediaplayer/bedrock/world_bridge.h"
 #include "mediaplayer/bedrock/world_read_abi.h"
 #include "mediaplayer/bedrock/world_write_abi.h"
+#include "mediaplayer/api_provider.h"
+#include "endstone_mediaplayer_api.h"
 #include "endstone_abi.h"
 #include <cppcompat/string.h>
+#include "cJSON.h"
 #include "miniz.h"
 #include <stb_ds.h>
 
@@ -49,7 +63,7 @@ void player_play_sound(void *player, const char *sound,
     snprintf(g_last_sound, sizeof(g_last_sound), "%s", sound);
 }
 
-/* --- Minimal test framework (same style as test_nbs_parser.c) --- */
+// --- Minimal test framework (same style as test_nbs_parser.c) ---
 static int g_pass = 0, g_fail = 0;
 
 #define EXPECT(cond, msg) do { \
@@ -65,8 +79,8 @@ static int g_pass = 0, g_fail = 0;
     else { g_fail++; } \
 } while(0)
 
-/* --- Fixture registry: EXPECT returns before a test's own remove(), so
- * every on-disk fixture path is registered and swept once in main(). --- */
+// --- Fixture registry: EXPECT returns before a test's own remove(), so
+// every on-disk fixture path is registered and swept once in main(). ---
 static const char *g_fixture_paths[64];
 static int g_fixture_path_count;
 
@@ -82,20 +96,188 @@ static const char *fixture(const char *path)
     return path;
 }
 
-static void remove_fixtures(void)
+static void remove_manifest_sidecar(const char *path)
 {
-    char aside[128];
-    for (int i = 0; i < g_fixture_path_count; i++) {
-        remove(g_fixture_paths[i]);
-        /* The persistence loader moves rejected files aside as .bad. */
-        snprintf(aside, sizeof(aside), "%s.bad", g_fixture_paths[i]);
-        remove(aside);
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return;
+    }
+    long length = ftell(file);
+    if (length <= 0 || length > 10 * 1024 * 1024) {
+        fclose(file);
+        return;
+    }
+    rewind(file);
+    char *data = calloc((size_t)length + 1, 1);
+    if (!data) {
+        fclose(file);
+        return;
+    }
+    size_t read_count = fread(data, 1, (size_t)length, file);
+    fclose(file);
+    if (read_count != (size_t)length) {
+        free(data);
+        return;
+    }
+    cJSON *root = cJSON_Parse(data);
+    free(data);
+    if (!root)
+        return;
+    cJSON *sidecar = cJSON_GetObjectItemCaseSensitive(
+        root, SCREEN_SIDECAR_FIELD);
+    if (cJSON_IsString(sidecar) && sidecar->valuestring[0]) {
+        const char *slash = strrchr(path, '/');
+        const char *backslash = strrchr(path, '\\');
+        const char *separator = slash;
+        if (backslash && (!separator || backslash > separator))
+            separator = backslash;
+        size_t directory_length = separator
+                                      ? (size_t)(separator - path + 1)
+                                      : 0;
+        size_t sidecar_length = strlen(sidecar->valuestring);
+        char *sidecar_path = calloc(
+            directory_length + sidecar_length + 1, 1);
+        if (sidecar_path) {
+            memcpy(sidecar_path, path, directory_length);
+            memcpy(sidecar_path + directory_length, sidecar->valuestring,
+                   sidecar_length);
+            remove(sidecar_path);
+            free(sidecar_path);
+        }
+    }
+    cJSON_Delete(root);
+}
+
+static void remove_persistence_artifacts(const char *path)
+{
+    if (!path)
+        return;
+    remove_manifest_sidecar(path);
+    remove(path);
+    for (int suffix = 0; suffix <= 8; suffix++) {
+        char bad_path[512];
+        if (suffix == 0)
+            snprintf(bad_path, sizeof(bad_path), "%s.bad", path);
+        else
+            snprintf(bad_path, sizeof(bad_path), "%s.bad.%d", path, suffix);
+        remove_manifest_sidecar(bad_path);
+        remove(bad_path);
     }
 }
 
-/* ================================================================
- * SCREEN GEOMETRY TESTS
- * ================================================================ */
+static void remove_fixtures(void)
+{
+    for (int i = 0; i < g_fixture_path_count; i++) {
+        remove_persistence_artifacts(g_fixture_paths[i]);
+    }
+}
+
+static void test_put_u16(uint8_t *bytes, uint16_t value)
+{
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8);
+}
+
+static void test_put_u32(uint8_t *bytes, uint32_t value)
+{
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8);
+    bytes[2] = (uint8_t)(value >> 16);
+    bytes[3] = (uint8_t)(value >> 24);
+}
+
+static void test_put_u64(uint8_t *bytes, uint64_t value)
+{
+    test_put_u32(bytes, (uint32_t)value);
+    test_put_u32(bytes + 4, (uint32_t)(value >> 32));
+}
+
+static int test_make_directory(const char *path)
+{
+#if defined(_WIN32)
+    return _mkdir(path) == 0 || errno == EEXIST;
+#else
+    return mkdir(path, 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+static void test_remove_directory(const char *path)
+{
+#if defined(_WIN32)
+    _rmdir(path);
+#else
+    rmdir(path);
+#endif
+}
+
+static int write_test_mps(const char *path, uint32_t width,
+                          uint32_t height, int malformed)
+{
+    if (malformed) {
+        FILE *bad = fopen(path, "wb");
+        if (!bad) return 0;
+        uint8_t header[MPS_HEADER_SIZE] = {0};
+        int ok = fwrite(header, 1, sizeof(header), bad) == sizeof(header);
+        fclose(bad);
+        return ok;
+    }
+    uint64_t tile_count = (uint64_t)width * height;
+    uint64_t data_offset = MPS_HEADER_SIZE +
+                           tile_count * MPS_INDEX_ENTRY_SIZE;
+    uint64_t file_size = data_offset + tile_count * MPS_TILE_BYTES;
+    uint8_t header[MPS_HEADER_SIZE] = {0};
+    memcpy(header, MPS_MAGIC, MPS_MAGIC_LEN);
+    test_put_u16(header + 4, MPS_FORMAT_VERSION);
+    test_put_u16(header + 6, MPS_HEADER_SIZE);
+    test_put_u32(header + 16, width);
+    test_put_u32(header + 20, height);
+    test_put_u16(header + 24, MPS_TILE_PIXEL_SIZE);
+    test_put_u16(header + 26, MPS_PIXFMT_ABGR8888);
+    test_put_u16(header + 28, MPS_INDEX_ENTRY_SIZE);
+    test_put_u64(header + 32, tile_count);
+    test_put_u64(header + 40, MPS_HEADER_SIZE);
+    test_put_u64(header + 48, data_offset);
+    test_put_u64(header + 56, file_size);
+    test_put_u32(header + 124,
+                 (uint32_t)mz_crc32(MZ_CRC32_INIT, header,
+                                    MPS_HEADER_SIZE - 4));
+
+    uint8_t *tile = calloc(1, MPS_TILE_BYTES);
+    if (!tile) return 0;
+    FILE *file = fopen(path, "wb");
+    if (!file) {
+        free(tile);
+        return 0;
+    }
+    int ok = fwrite(header, 1, sizeof(header), file) == sizeof(header);
+    for (uint64_t i = 0; ok && i < tile_count; i++) {
+        memset(tile, (int)(i + 1), MPS_TILE_BYTES);
+        uint32_t crc = (uint32_t)mz_crc32(MZ_CRC32_INIT, tile,
+                                          MPS_TILE_BYTES);
+        uint8_t entry[MPS_INDEX_ENTRY_SIZE] = {0};
+        test_put_u64(entry, data_offset + i * MPS_TILE_BYTES);
+        test_put_u32(entry + 8, MPS_TILE_BYTES);
+        test_put_u32(entry + 12, MPS_TILE_BYTES);
+        test_put_u32(entry + 16, crc);
+        test_put_u32(entry + 20, crc);
+        test_put_u16(entry + 24, MPS_CODEC_RAW);
+        ok = fwrite(entry, 1, sizeof(entry), file) == sizeof(entry);
+    }
+    for (uint64_t i = 0; ok && i < tile_count; i++) {
+        memset(tile, (int)(i + 1), MPS_TILE_BYTES);
+        ok = fwrite(tile, 1, MPS_TILE_BYTES, file) == MPS_TILE_BYTES;
+    }
+    fclose(file);
+    free(tile);
+    return ok;
+}
+
+// ================================================================
+// SCREEN GEOMETRY TESTS
+// ================================================================
 
 static int test_geom_xy_plane_south(void)
 {
@@ -109,15 +291,15 @@ static int test_geom_xy_plane_south(void)
     EXPECT(g.height == 3, "height should be 3");
     EXPECT(g.facing == SCREEN_FACE_SOUTH, "facing should be SOUTH");
 
-    /* Tile (0,0) = top-left from viewer = (minX, maxY) for SOUTH */
+    // Tile (0,0) = top-left from viewer = (minX, maxY) for SOUTH
     struct screen_pos t00 = screen_geom_tile_pos(&g, 0, 0);
     EXPECT(t00.x == 0 && t00.y == 66 && t00.z == 5, "tile(0,0) should be (0,66,5)");
 
-    /* Tile (3,0) = top-right = (maxX, maxY) */
+    // Tile (3,0) = top-right = (maxX, maxY)
     struct screen_pos t30 = screen_geom_tile_pos(&g, 3, 0);
     EXPECT(t30.x == 3 && t30.y == 66 && t30.z == 5, "tile(3,0) should be (3,66,5)");
 
-    /* Tile (0,2) = bottom-left = (minX, minY) */
+    // Tile (0,2) = bottom-left = (minX, minY)
     struct screen_pos t02 = screen_geom_tile_pos(&g, 0, 2);
     EXPECT(t02.x == 0 && t02.y == 64 && t02.z == 5, "tile(0,2) should be (0,64,5)");
 
@@ -133,7 +315,7 @@ static int test_geom_xy_plane_north(void)
                                                     SCREEN_FACE_NORTH, &g);
     EXPECT(err == SCREEN_GEOM_OK, "validate should succeed");
 
-    /* NORTH: col0 = maxX, dir = -1 */
+    // NORTH: col0 = maxX, dir = -1
     struct screen_pos t00 = screen_geom_tile_pos(&g, 0, 0);
     EXPECT(t00.x == 3 && t00.y == 66 && t00.z == 5, "tile(0,0) NORTH should be (3,66,5)");
 
@@ -154,7 +336,7 @@ static int test_geom_zy_plane_east(void)
     EXPECT(g.width == 7, "width should be 7");
     EXPECT(g.height == 4, "height should be 4");
 
-    /* EAST: col0 = maxZ, dir = -1 */
+    // EAST: col0 = maxZ, dir = -1
     struct screen_pos t00 = screen_geom_tile_pos(&g, 0, 0);
     EXPECT(t00.x == 10 && t00.y == 70 && t00.z == 6, "tile(0,0) EAST should be (10,70,6)");
 
@@ -176,7 +358,7 @@ static int test_geom_zy_plane_west(void)
                                                     SCREEN_FACE_WEST, &g);
     EXPECT(err == SCREEN_GEOM_OK, "validate should succeed");
 
-    /* WEST: col0 = minZ, dir = +1 */
+    // WEST: col0 = minZ, dir = +1
     struct screen_pos t00 = screen_geom_tile_pos(&g, 0, 0);
     EXPECT(t00.x == 10 && t00.y == 70 && t00.z == 0, "tile(0,0) WEST should be (10,70,0)");
 
@@ -188,7 +370,7 @@ static int test_geom_zy_plane_west(void)
 
 static int test_geom_reversed_corners(void)
 {
-    /* Same wall, corners in opposite order - should produce same geometry */
+    // Same wall, corners in opposite order - should produce same geometry
     struct screen_pos c1 = {3, 64, 5};
     struct screen_pos c2 = {0, 66, 5};
     struct screen_geom g;
@@ -198,7 +380,7 @@ static int test_geom_reversed_corners(void)
     EXPECT(g.width == 4, "width should be 4");
     EXPECT(g.height == 3, "height should be 3");
 
-    /* Tile ordering should be identical regardless of corner input order */
+    // Tile ordering should be identical regardless of corner input order
     struct screen_pos t00 = screen_geom_tile_pos(&g, 0, 0);
     EXPECT(t00.x == 0 && t00.y == 66 && t00.z == 5, "tile(0,0) should be (0,66,5) regardless of corner order");
 
@@ -237,32 +419,69 @@ static int test_geom_7x4(void)
     return 1;
 }
 
+static int test_geom_checked_logical_limits(void)
+{
+    struct screen_geom g;
+    EXPECT(screen_geom_validate_dimensions(0, 1) ==
+               SCREEN_GEOM_ERR_WIDTH_INVALID,
+           "zero width should be rejected by the explicit helper");
+    EXPECT(screen_geom_validate_dimensions(1, 0) ==
+               SCREEN_GEOM_ERR_HEIGHT_INVALID,
+           "zero height should be rejected by the explicit helper");
+    EXPECT(screen_geom_validate_dimensions(1025, 1) ==
+               SCREEN_GEOM_ERR_WIDTH_EXCEED,
+           "width 1025 should be rejected by the explicit helper");
+    EXPECT(screen_geom_validate_dimensions(1, 1025) ==
+               SCREEN_GEOM_ERR_HEIGHT_EXCEED,
+           "height 1025 should be rejected by the explicit helper");
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 1023, 0},
+               (struct screen_pos){1023, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &g) == SCREEN_GEOM_OK &&
+               g.width == 1024 && g.height == 1024,
+           "1024x1024 logical geometry should be accepted");
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){INT_MIN, 0, 0},
+               (struct screen_pos){INT_MAX, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &g) == SCREEN_GEOM_ERR_WIDTH_EXCEED,
+           "extreme horizontal coordinates should be rejected safely");
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, INT_MAX, 0},
+               (struct screen_pos){0, INT_MIN, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &g) == SCREEN_GEOM_ERR_HEIGHT_EXCEED,
+           "extreme vertical coordinates should be rejected safely");
+    return 1;
+}
+
 static int test_geom_width_exceed(void)
 {
     struct screen_pos c1 = {0, 65, 0};
-    struct screen_pos c2 = {7, 65, 0}; /* width = 8 */
+    struct screen_pos c2 = {1024, 65, 0}; // width = 1025
     struct screen_geom g;
     enum screen_geom_err err = screen_geom_validate(c1, c2, "minecraft:overworld", "minecraft:overworld",
                                                     SCREEN_FACE_SOUTH, &g);
-    EXPECT(err == SCREEN_GEOM_ERR_WIDTH_EXCEED, "width 8 should fail");
+    EXPECT(err == SCREEN_GEOM_ERR_WIDTH_EXCEED, "width 1025 should fail");
     return 1;
 }
 
 static int test_geom_height_exceed(void)
 {
     struct screen_pos c1 = {0, 69, 0};
-    struct screen_pos c2 = {0, 64, 0}; /* height = 6 */
+    struct screen_pos c2 = {0, -955, 0}; // height = 1025
     struct screen_geom g;
     enum screen_geom_err err = screen_geom_validate(c1, c2, "minecraft:overworld", "minecraft:overworld",
                                                     SCREEN_FACE_SOUTH, &g);
-    EXPECT(err == SCREEN_GEOM_ERR_HEIGHT_EXCEED, "height 6 should fail");
+    EXPECT(err == SCREEN_GEOM_ERR_HEIGHT_EXCEED, "height 1025 should fail");
     return 1;
 }
 
 static int test_geom_not_vertical(void)
 {
     struct screen_pos c1 = {0, 65, 0};
-    struct screen_pos c2 = {3, 65, 3}; /* diagonal - neither X nor Z constant */
+    struct screen_pos c2 = {3, 65, 3}; // diagonal - neither X nor Z constant
     struct screen_geom g;
     enum screen_geom_err err = screen_geom_validate(c1, c2, "minecraft:overworld", "minecraft:overworld",
                                                     SCREEN_FACE_SOUTH, &g);
@@ -283,7 +502,7 @@ static int test_geom_dimension_mismatch(void)
 
 static int test_geom_facing_mismatch(void)
 {
-    /* X-Y plane (constant Z) with EAST facing should fail */
+    // X-Y plane (constant Z) with EAST facing should fail
     struct screen_pos c1 = {0, 65, 5};
     struct screen_pos c2 = {3, 65, 5};
     struct screen_geom g;
@@ -320,7 +539,7 @@ static int test_geom_facing_from_player(void)
     EXPECT(screen_geom_facing_from_player(c1, c2, player_north) == SCREEN_FACE_NORTH,
            "player at Z<5 should give NORTH");
 
-    /* Z-Y plane */
+    // Z-Y plane
     struct screen_pos c3 = {10, 65, 0};
     struct screen_pos c4 = {10, 65, 5};
 
@@ -449,9 +668,9 @@ static int test_status_error_names(void)
     return 1;
 }
 
-/* ================================================================
- * VIDEO FORMAT TESTS (MCV v1)
- * ================================================================ */
+// ================================================================
+// VIDEO FORMAT TESTS (MCV v1)
+// ================================================================
 
 static void write_u16_le(FILE *f, uint16_t v) { fputc(v & 0xFF, f); fputc((v >> 8) & 0xFF, f); }
 static void write_u32_le(FILE *f, uint32_t v) {
@@ -475,7 +694,7 @@ static void store_u64_le(uint8_t *p, uint64_t v) {
     store_u32_le(p + 4, (uint32_t)(v >> 32));
 }
 
-/* Build a fully valid 128-byte MCV header, trailing CRC included. */
+// Build a fully valid 128-byte MCV header, trailing CRC included.
 static void build_mcv_header(uint8_t out[MCV_HEADER_SIZE], uint16_t version,
                              uint16_t tile_w, uint16_t tile_h,
                              uint16_t pixel_w, uint16_t pixel_h,
@@ -488,7 +707,7 @@ static void build_mcv_header(uint8_t out[MCV_HEADER_SIZE], uint16_t version,
     memcpy(out, MCV_MAGIC, MCV_MAGIC_LEN);
     store_u16_le(out + 4, MCV_HEADER_SIZE);
     store_u16_le(out + 6, version);
-    /* required_flags, optional_flags, pixel_format stay zero */
+    // required_flags, optional_flags, pixel_format stay zero
     store_u16_le(out + 16, tile_w);
     store_u16_le(out + 18, tile_h);
     store_u16_le(out + 20, pixel_w);
@@ -566,8 +785,8 @@ static void patch_u64(const char *path, long offset, uint64_t value)
     fclose(f);
 }
 
-/* Recompute the header CRC after a test deliberately patched a header
- * field, so the specific validation error surfaces instead of CRC. */
+// Recompute the header CRC after a test deliberately patched a header
+// field, so the specific validation error surfaces instead of CRC.
 static void fix_header_crc(const char *path)
 {
     FILE *f = fopen(path, "r+b");
@@ -592,7 +811,7 @@ static void write_index_entry(FILE *f, uint64_t offset, uint64_t size,
     write_u16_le(f, reserved);
 }
 
-/* Pattern frame: R=x%256, G=y%256, B=frame%256, A=255 (ABGR bytes). */
+// Pattern frame: R=x%256, G=y%256, B=frame%256, A=255 (ABGR bytes).
 static void fill_test_frame(uint8_t *buf, int pw, int ph, uint32_t frame_idx)
 {
     for (size_t p = 0; p < (size_t)pw * ph; p++) {
@@ -604,7 +823,7 @@ static void fill_test_frame(uint8_t *buf, int pw, int ph, uint32_t frame_idx)
     }
 }
 
-/* Create a minimal valid uncompressed .mcv file. */
+// Create a minimal valid uncompressed .mcv file.
 static int create_test_mcv(int tile_w, int tile_h, int fps_num, int fps_den,
                            uint32_t frame_count, const char *path)
 {
@@ -645,8 +864,8 @@ static int create_test_mcv(int tile_w, int tile_h, int fps_num, int fps_den,
     return 1;
 }
 
-/* Create a zlib-codec .mcv with pattern frames; optionally reports the
- * stored extent of frame 0 for corruption tests. */
+// Create a zlib-codec .mcv with pattern frames; optionally reports the
+// stored extent of frame 0 for corruption tests.
 static int create_test_mcv_zlib(int tile_w, int tile_h, uint32_t frame_count,
                                 const char *path, uint64_t *out_first_offset,
                                 uint64_t *out_first_size)
@@ -713,8 +932,8 @@ cleanup:
     return ok;
 }
 
-/* zlib-codec fixture whose index entries are supplied by the test
- * (possibly hostile); the data region is zero filler. */
+// zlib-codec fixture whose index entries are supplied by the test
+// (possibly hostile); the data region is zero filler.
 static int create_ref_fixture(const char *path, uint64_t frame_count,
                               uint64_t data_size,
                               const struct mcv_frame_ref *refs,
@@ -751,22 +970,22 @@ static int test_mcv_valid_1x1(void)
     EXPECT(mf.header.fps_num == 20, "fps_num = 20");
     EXPECT(mf.header.codec == MCV_CODEC_NONE, "codec = none");
 
-    /* Read frame 0 */
+    // Read frame 0
     uint8_t *buf = malloc(128 * 128 * 4);
     EXPECT(buf != nullptr, "alloc");
     err = mcv_read_frame(&mf, 0, buf, 128 * 128 * 4);
     EXPECT(err == MCV_OK, "read frame 0");
 
-    /* Check pixel (0,0): R=0, G=0, B=0, A=255 */
+    // Check pixel (0,0): R=0, G=0, B=0, A=255
     EXPECT(buf[0] == 0 && buf[1] == 0 && buf[2] == 0 && buf[3] == 255, "pixel(0,0) frame0");
 
-    /* Check pixel (1,0): R=1, G=0, B=0, A=255 */
+    // Check pixel (1,0): R=1, G=0, B=0, A=255
     EXPECT(buf[4] == 1 && buf[5] == 0 && buf[6] == 0 && buf[7] == 255, "pixel(1,0) frame0");
 
-    /* Read frame 2 */
+    // Read frame 2
     err = mcv_read_frame(&mf, 2, buf, 128 * 128 * 4);
     EXPECT(err == MCV_OK, "read frame 2");
-    /* pixel(0,0) frame2: R=0, G=0, B=2, A=255 */
+    // pixel(0,0) frame2: R=0, G=0, B=2, A=255
     EXPECT(buf[0] == 0 && buf[1] == 0 && buf[2] == 2 && buf[3] == 255, "pixel(0,0) frame2");
 
     free(buf);
@@ -806,7 +1025,7 @@ static int test_mcv_bad_magic(void)
     EXPECT(err == MCV_ERR_MAGIC, "bad magic should fail");
     remove(path);
 
-    /* Other magic values are rejected. */
+    // Other magic values are rejected.
     f = fopen(path, "wb");
     fwrite("MPV\x01", 1, 4, f);
     for (int i = 0; i < 124; i++) fputc(0, f);
@@ -839,7 +1058,7 @@ static int test_mcv_truncated_header(void)
     FILE *f = fopen(path, "wb");
     fwrite(MCV_MAGIC, 1, 4, f);
     write_u16_le(f, MCV_HEADER_SIZE);
-    fclose(f); /* only 6 bytes */
+    fclose(f); // only 6 bytes
 
     struct mcv_file mf;
     enum mcv_error err = mcv_open(path, &mf);
@@ -852,8 +1071,8 @@ static int test_mcv_header_crc(void)
 {
     const char *path = fixture("test_header_crc.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    /* Patch a field WITHOUT fixing the CRC: the CRC gate must fire
-     * before any field-specific validation. */
+    // Patch a field WITHOUT fixing the CRC: the CRC gate must fire
+    // before any field-specific validation.
     patch_u16(path, 16, 2);
 
     struct mcv_file mf;
@@ -867,7 +1086,7 @@ static int test_mcv_flags_policy(void)
 {
     const char *path = fixture("test_flags_policy.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    patch_u32(path, 8, 1); /* unknown required feature bit */
+    patch_u32(path, 8, 1); // unknown required feature bit
     fix_header_crc(path);
     struct mcv_file mf;
     EXPECT(mcv_open(path, &mf) == MCV_ERR_UNSUPPORTED_FEATURE,
@@ -875,7 +1094,7 @@ static int test_mcv_flags_policy(void)
     remove(path);
 
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    patch_u32(path, 12, 0xFFFFFFFFu); /* unknown optional bits */
+    patch_u32(path, 12, 0xFFFFFFFFu); // unknown optional bits
     fix_header_crc(path);
     EXPECT(mcv_open(path, &mf) == MCV_OK,
            "unknown optional flags are ignored");
@@ -885,7 +1104,7 @@ static int test_mcv_flags_policy(void)
     remove(path);
 
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    patch_u32(path, 68, 1); /* reserved area must stay zero */
+    patch_u32(path, 68, 1); // reserved area must stay zero
     fix_header_crc(path);
     EXPECT(mcv_open(path, &mf) == MCV_ERR_INVALID_HEADER,
            "nonzero reserved area is rejected");
@@ -949,7 +1168,7 @@ static int test_mcv_frame_reference_decode(void)
     }
     encoded[16] = 0xDD; encoded[17] = 0xCC;
     encoded[18] = 0xBB; encoded[19] = 0xAA;
-    encoded[20] = 0x01; /* independent */
+    encoded[20] = 0x01; // independent
     struct mcv_frame_ref ref = {0};
     mcv_decode_frame_ref(encoded, &ref);
     EXPECT(sizeof(ref.offset) == 8 && sizeof(ref.size) == 8,
@@ -1044,7 +1263,7 @@ static int test_mcv_truncated_data_and_index(void)
     write_mcv_header(f, 1, 1, 1, 128, 128, 20, 1, MCV_CODEC_NONE, 1,
                      frame_size, 128, 128 + frame_size, 24);
     write_zero_bytes(f, frame_size);
-    write_u64_le(f, 0); /* only a third of an index entry */
+    write_u64_le(f, 0); // only a third of an index entry
     fclose(f);
     EXPECT(mcv_open(index_path, &file) == MCV_ERR_INDEX_TRUNCATED,
            "partial MCV v1 index is rejected");
@@ -1112,7 +1331,7 @@ static int test_mcv_wrong_uncompressed_stored_size(void)
 {
     const char *path = fixture("test_wrong_stored_size.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    /* Entry 0 size field lives at index_offset + 8. */
+    // Entry 0 size field lives at index_offset + 8.
     patch_u64(path, (long)(MCV_HEADER_SIZE + 128 * 128 * 4 + 8),
               128 * 128 * 4 - 1);
     struct mcv_file file;
@@ -1130,8 +1349,8 @@ static int test_mcv_uncompressed_layout_enforced(void)
 {
     const char *path = fixture("test_uncompressed_layout.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 2, path), "create fixture");
-    /* Point frame 1 back at frame 0: uncompressed layout is fully
-     * determined, so a non-canonical offset must be rejected. */
+    // Point frame 1 back at frame 0: uncompressed layout is fully
+    // determined, so a non-canonical offset must be rejected.
     const uint64_t frame_size = 128 * 128 * 4;
     patch_u64(path, (long)(MCV_HEADER_SIZE + 2 * frame_size + 24), 0);
     struct mcv_file file;
@@ -1194,13 +1413,51 @@ static int test_mcv_frame_crc_mismatch(void)
 {
     const char *path = fixture("test_frame_crc.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    patch_u8(path, MCV_HEADER_SIZE + 100, 0xFF); /* corrupt pixel data */
+    patch_u8(path, MCV_HEADER_SIZE + 100, 0xFF); // corrupt pixel data
     struct mcv_file file;
     EXPECT(mcv_open(path, &file) == MCV_OK,
            "open does not touch frame data");
     uint8_t buf[128 * 128 * 4];
     EXPECT(mcv_read_frame(&file, 0, buf, sizeof(buf)) == MCV_ERR_FRAME_CRC,
            "corrupted frame data is caught by the frame CRC");
+    mcv_close(&file);
+    remove(path);
+    return 1;
+}
+
+static int test_mcv_zlib_frame_crc_mismatch(void)
+{
+    const char *path = fixture("test_zlib_frame_crc.mcv");
+    EXPECT(create_test_mcv_zlib(1, 1, 1, path, nullptr, nullptr),
+           "create zlib CRC fixture");
+    struct mcv_file file;
+    EXPECT(mcv_open(path, &file) == MCV_OK, "open zlib CRC fixture");
+    uint64_t index_offset = file.header.frame_index_offset;
+    uint8_t buf[128 * 128 * 4];
+    EXPECT(mcv_read_frame(&file, 0, buf, sizeof(buf)) == MCV_OK,
+           "valid compressed frame decodes before CRC corruption");
+    uint32_t original_crc = file.cache[0].crc32;
+    mcv_close(&file);
+
+    // Leave the compressed stream intact and corrupt only its stored CRC.
+    patch_u32(path, (long)(index_offset + 16), original_crc ^ UINT32_C(1));
+    EXPECT(mcv_open(path, &file) == MCV_OK &&
+               mcv_read_frame(&file, 0, buf, sizeof(buf)) ==
+                   MCV_ERR_FRAME_CRC,
+           "compressed stored CRC mismatch is reported before decompression");
+    mcv_close(&file);
+    remove(path);
+    return 1;
+}
+
+static int test_mcv_utf8_filename(void)
+{
+    const char *path = fixture("test_\xC3\xA9.mcv");
+    EXPECT(create_test_mcv(1, 1, 20, 1, 1, path),
+           "create UTF-8 filename fixture");
+    struct mcv_file file;
+    EXPECT(mcv_open(path, &file) == MCV_OK,
+           "UTF-8 MCV filename opens through fopen_utf8");
     mcv_close(&file);
     remove(path);
     return 1;
@@ -1214,13 +1471,13 @@ static int test_mcv_frame_flags_validation(void)
     uint8_t buf[128 * 128 * 4];
 
     EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create fixture");
-    patch_u16(path, flags_offset, 0); /* independent bit cleared */
+    patch_u16(path, flags_offset, 0); // independent bit cleared
     EXPECT(mcv_open(path, &file) == MCV_OK, "open stays O(1)");
     EXPECT(mcv_read_frame(&file, 0, buf, sizeof(buf)) == MCV_ERR_FRAME_FLAGS,
            "non-independent frame is rejected in v1");
     mcv_close(&file);
 
-    patch_u16(path, flags_offset, 0x0003); /* unknown flag bit */
+    patch_u16(path, flags_offset, 0x0003); // unknown flag bit
     EXPECT(mcv_open(path, &file) == MCV_OK &&
                mcv_read_frame(&file, 0, buf, sizeof(buf)) ==
                    MCV_ERR_FRAME_FLAGS,
@@ -1228,7 +1485,7 @@ static int test_mcv_frame_flags_validation(void)
     mcv_close(&file);
 
     patch_u16(path, flags_offset, MCV_FRAME_FLAG_INDEPENDENT);
-    patch_u16(path, flags_offset + 2, 1); /* reserved must stay zero */
+    patch_u16(path, flags_offset + 2, 1); // reserved must stay zero
     EXPECT(mcv_open(path, &file) == MCV_OK &&
                mcv_read_frame(&file, 0, buf, sizeof(buf)) ==
                    MCV_ERR_FRAME_FLAGS,
@@ -1257,20 +1514,17 @@ static int test_mcv_zlib_roundtrip(void)
            "zlib frame 3 decompresses to the pattern");
     mcv_close(&file);
 
-    /* Corrupting a stored byte must still be detected even though the
-     * reader skips the redundant frame CRC for zlib: the stream's own
-     * Adler-32 (or its structure) fails decompression. */
+    // Corrupting a stored byte must fail the stored-byte CRC gate first.
     patch_u8(path, (long)(MCV_HEADER_SIZE + first_offset + first_size / 2),
              0xFF);
     EXPECT(mcv_open(path, &file) == MCV_OK &&
                mcv_read_frame(&file, 0, buf, sizeof(buf)) ==
-                   MCV_ERR_DECOMPRESS,
-           "corrupted zlib stream is caught by decompression");
+                   MCV_ERR_FRAME_CRC,
+           "corrupted compressed bytes are caught by the stored CRC");
     mcv_close(&file);
     remove(path);
 
-    /* Corruption with a matching entry CRC is likewise rejected, which is
-     * exactly why the CRC adds nothing for compressed frames. */
+    // Recomputing the stored CRC lets invalid zlib reach decompression.
     EXPECT(create_test_mcv_zlib(1, 1, 1, path, &first_offset, &first_size),
            "create second zlib fixture");
     EXPECT(mcv_open(path, &file) == MCV_OK, "reopen zlib fixture");
@@ -1303,8 +1557,8 @@ static int test_mcv_zlib_roundtrip(void)
 
 static int test_mcv_index_window(void)
 {
-    /* More frames than MCV_INDEX_CACHE_ENTRIES to force window refills
-     * in both directions. */
+    // More frames than MCV_INDEX_CACHE_ENTRIES to force window refills
+    // in both directions.
     const uint32_t frame_count = 300;
     const char *path = fixture("test_index_window.mcv");
     EXPECT(create_test_mcv_zlib(1, 1, frame_count, path, nullptr, nullptr),
@@ -1319,11 +1573,11 @@ static int test_mcv_index_window(void)
         uint64_t want_first;
         uint32_t want_count;
     } probes[] = {
-        {0, 0, MCV_INDEX_CACHE_ENTRIES},          /* initial fill */
-        {255, 0, MCV_INDEX_CACHE_ENTRIES},        /* hit: no refill */
-        {256, 256, frame_count - MCV_INDEX_CACHE_ENTRIES}, /* tail refill */
-        {299, 256, frame_count - MCV_INDEX_CACHE_ENTRIES}, /* hit near EOF */
-        {0, 0, MCV_INDEX_CACHE_ENTRIES},          /* backward refill */
+        {0, 0, MCV_INDEX_CACHE_ENTRIES},          // initial fill
+        {255, 0, MCV_INDEX_CACHE_ENTRIES},        // hit: no refill
+        {256, 256, frame_count - MCV_INDEX_CACHE_ENTRIES}, // tail refill
+        {299, 256, frame_count - MCV_INDEX_CACHE_ENTRIES}, // hit near EOF
+        {0, 0, MCV_INDEX_CACHE_ENTRIES},          // backward refill
     };
     for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
         uint32_t idx = probes[i].idx;
@@ -1341,9 +1595,9 @@ static int test_mcv_index_window(void)
     return 1;
 }
 
-/* ================================================================
- * PLAYBACK CLOCK TESTS
- * ================================================================ */
+// ================================================================
+// PLAYBACK CLOCK TESTS
+// ================================================================
 
 static int test_clock_normal_20fps(void)
 {
@@ -1358,18 +1612,18 @@ static int test_clock_normal_20fps(void)
     EXPECT(s.state == PLAY_PLAYING, "state should be PLAYING");
     EXPECT(s.frame_duration_ms > 49.9 && s.frame_duration_ms < 50.1, "frame dur ~50ms");
 
-    /* At t=1000 (start), frame should be 0 */
+    // At t=1000 (start), frame should be 0
     uint32_t frame = 0;
     int changed = video_session_tick(&s, 1000, &frame);
-    /* First tick at start time - frame 0 already loaded */
+    // First tick at start time - frame 0 already loaded
     EXPECT(s.current_frame == 0, "frame should be 0 at start");
 
-    /* At t=1050, should advance to frame 1 */
+    // At t=1050, should advance to frame 1
     changed = video_session_tick(&s, 1050, &frame);
     EXPECT(changed == 1, "should change at 50ms");
     EXPECT(frame == 1, "frame should be 1 at 50ms");
 
-    /* At t=1100, frame 2 */
+    // At t=1100, frame 2
     changed = video_session_tick(&s, 1100, &frame);
     EXPECT(changed == 1 && frame == 2, "frame 2 at 100ms");
 
@@ -1388,7 +1642,7 @@ static int test_clock_skip_frames(void)
 
     video_session_start(&s, path, 1, 0, 0);
 
-    /* Jump ahead 500ms = 10 frames at 20fps */
+    // Jump ahead 500ms = 10 frames at 20fps
     uint32_t frame = 0;
     int changed = video_session_tick(&s, 500, &frame);
     EXPECT(changed == 1, "should change after lag");
@@ -1410,25 +1664,25 @@ static int test_clock_pause_resume(void)
 
     video_session_start(&s, path, 1, 0, 0);
 
-    /* Advance to frame 4 (200ms) */
+    // Advance to frame 4 (200ms)
     uint32_t frame = 0;
     video_session_tick(&s, 200, &frame);
     EXPECT(frame == 4, "frame 4 at 200ms");
 
-    /* Pause at 250ms */
+    // Pause at 250ms
     video_session_pause(&s, 250);
     EXPECT(s.state == PLAY_PAUSED, "should be paused");
 
-    /* Tick during pause - no change */
+    // Tick during pause - no change
     int changed = video_session_tick(&s, 500, &frame);
     EXPECT(changed == 0, "no change during pause");
 
-    /* Resume at 1000ms (paused for 750ms) */
+    // Resume at 1000ms (paused for 750ms)
     video_session_resume(&s, 1000);
     EXPECT(s.state == PLAY_PLAYING, "should be playing");
     EXPECT(s.accumulated_pause == 750, "accumulated pause = 750ms");
 
-    /* Effective time = 1050 - 750 = 300ms → frame 6 */
+    // Effective time = 1050 - 750 = 300ms → frame 6
     changed = video_session_tick(&s, 1050, &frame);
     EXPECT(changed == 1, "should change after resume");
     EXPECT(frame == 6, "frame 6 at effective 300ms");
@@ -1444,12 +1698,12 @@ static int test_clock_single_play(void)
     memset(&s, 0, sizeof(s));
 
     const char *path = fixture("test_single.mcv");
-    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); /* 5 frames = 250ms total */
+    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); // 5 frames = 250ms total
 
-    video_session_start(&s, path, 1, 0, 0); /* loop=1 (play once) */
+    video_session_start(&s, path, 1, 0, 0); // loop=1 (play once)
 
     uint32_t frame = 0;
-    /* At 300ms, video should be finished (5 frames * 50ms = 250ms) */
+    // At 300ms, video should be finished (5 frames * 50ms = 250ms)
     int changed = video_session_tick(&s, 300, &frame);
     EXPECT(changed == 1, "should signal end");
     EXPECT(s.state == PLAY_FINISHED, "state should be FINISHED");
@@ -1466,16 +1720,16 @@ static int test_clock_infinite_loop(void)
     memset(&s, 0, sizeof(s));
 
     const char *path = fixture("test_loop.mcv");
-    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); /* 5 frames */
+    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); // 5 frames
 
-    video_session_start(&s, path, -1, 0, 0); /* infinite loop */
+    video_session_start(&s, path, -1, 0, 0); // infinite loop
 
     uint32_t frame = 0;
-    /* At 250ms = exactly 5 frames, should wrap to frame 0 */
+    // At 250ms = exactly 5 frames, should wrap to frame 0
     video_session_tick(&s, 260, &frame);
-    EXPECT(frame == 0 || frame == 1, "should wrap around"); /* 260/50=5.2 → 5%5=0 */
+    EXPECT(frame == 0 || frame == 1, "should wrap around"); // 260/50=5.2 → 5%5=0
 
-    /* At 300ms = 6 frames elapsed, frame 6%5=1 */
+    // At 300ms = 6 frames elapsed, frame 6%5=1
     video_session_tick(&s, 300, &frame);
     EXPECT(frame == 1, "frame 1 after wrap");
 
@@ -1492,12 +1746,12 @@ static int test_clock_multi_loop(void)
     memset(&s, 0, sizeof(s));
 
     const char *path = fixture("test_multi.mcv");
-    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); /* 5 frames, 250ms per loop */
+    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); // 5 frames, 250ms per loop
 
-    video_session_start(&s, path, 3, 0, 0); /* 3 loops = 750ms total */
+    video_session_start(&s, path, 3, 0, 0); // 3 loops = 750ms total
 
     uint32_t frame = 0;
-    /* At 800ms, should be finished (3*250=750ms) */
+    // At 800ms, should be finished (3*250=750ms)
     video_session_tick(&s, 800, &frame);
     EXPECT(s.state == PLAY_FINISHED, "should finish after 3 loops");
 
@@ -1515,19 +1769,19 @@ static int test_clock_two_screens_independent(void)
     const char *path1 = fixture("test_ind1.mcv");
     const char *path2 = fixture("test_ind2.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 10, path1), "create fixture");
-    EXPECT(create_test_mcv(1, 1, 10, 1, 10, path2), "create fixture"); /* 10fps = 100ms per frame */
+    EXPECT(create_test_mcv(1, 1, 10, 1, 10, path2), "create fixture"); // 10fps = 100ms per frame
 
     video_session_start(&s1, path1, 1, 0, 0);
     video_session_start(&s2, path2, 1, 1, 0);
 
     uint32_t f1 = 0, f2 = 0;
-    /* At 200ms: s1 at frame 4 (200/50), s2 at frame 2 (200/100) */
+    // At 200ms: s1 at frame 4 (200/50), s2 at frame 2 (200/100)
     video_session_tick(&s1, 200, &f1);
     video_session_tick(&s2, 200, &f2);
     EXPECT(f1 == 4, "screen1 frame 4 at 200ms");
     EXPECT(f2 == 2, "screen2 frame 2 at 200ms");
 
-    /* Stop screen1, screen2 continues */
+    // Stop screen1, screen2 continues
     video_session_stop(&s1);
     EXPECT(s1.state == PLAY_STOPPED, "screen1 stopped");
 
@@ -1541,9 +1795,9 @@ static int test_clock_two_screens_independent(void)
     return 1;
 }
 
-/* ================================================================
- * COMMAND ARGUMENT TESTS
- * ================================================================ */
+// ================================================================
+// COMMAND ARGUMENT TESTS
+// ================================================================
 
 static int test_args_parse_int(void)
 {
@@ -1573,8 +1827,8 @@ static int test_args_parse_loop(void)
     EXPECT(mpv_parse_loop("1", &loop) && loop == 1, "1 plays once");
     EXPECT(mpv_parse_loop("250", &loop) && loop == 250, "N repeats N times");
 
-    /* Invalid specifications must fail loudly but still leave a safe
-     * play-once value, never an accidental infinite loop. */
+    // Invalid specifications must fail loudly but still leave a safe
+    // play-once value, never an accidental infinite loop.
     EXPECT(!mpv_parse_loop("0", &loop) && loop == 1, "0 is rejected");
     EXPECT(!mpv_parse_loop("-2", &loop) && loop == 1,
            "negatives other than -1 are rejected");
@@ -1593,7 +1847,7 @@ static int test_args_parse_index(void)
     EXPECT(!mpv_parse_index("3", 3, &index), "index at count is rejected");
     EXPECT(!mpv_parse_index("-1", 3, &index), "negative index is rejected");
     EXPECT(!mpv_parse_index("0", 0, &index), "empty catalog rejects any index");
-    /* atoi() used to turn this into video 0 and play the wrong file. */
+    // atoi() used to turn this into video 0 and play the wrong file.
     EXPECT(!mpv_parse_index("abc", 3, &index),
            "non-numeric index is rejected instead of playing video 0");
     return 1;
@@ -1608,9 +1862,9 @@ static int test_args_video_fits_screen(void)
     return 1;
 }
 
-/* ================================================================
- * SESSION LIFECYCLE TESTS
- * ================================================================ */
+// ================================================================
+// SESSION LIFECYCLE TESTS
+// ================================================================
 
 static int test_session_multi_loop_counter(void)
 {
@@ -1618,7 +1872,7 @@ static int test_session_multi_loop_counter(void)
     memset(&s, 0, sizeof(s));
 
     const char *path = fixture("test_loop_counter.mcv");
-    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); /* 5 frames = 250ms per loop */
+    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); // 5 frames = 250ms per loop
     video_session_start(&s, path, 3, 1, 0);
 
     uint32_t frame = 0;
@@ -1646,8 +1900,8 @@ static int test_session_loop_bounds(void)
     const char *path = fixture("test_loop_bounds.mcv");
     EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture");
 
-    /* A huge loop count must not overflow the total-frame computation
-     * into a premature finish. */
+    // A huge loop count must not overflow the total-frame computation
+    // into a premature finish.
     video_session_start(&s, path, 1000000, 1, 0);
     uint32_t frame = 0;
     video_session_tick(&s, 100000, &frame);
@@ -1655,7 +1909,7 @@ static int test_session_loop_bounds(void)
            "large finite loop count keeps playing rather than overflowing");
     video_session_stop(&s);
 
-    /* Negative counts other than -1 are meaningless: play once. */
+    // Negative counts other than -1 are meaningless: play once.
     video_session_start(&s, path, -7, 1, 0);
     EXPECT(s.loop_total == 1, "invalid negative loop is normalized to once");
     video_session_tick(&s, 400, &frame);
@@ -1682,7 +1936,7 @@ static int test_engine_slot_lookup_by_runtime_id(void)
     EXPECT(video_engine_find(&eng, 7) == a, "session is found by runtime id");
     EXPECT(video_engine_find(&eng, 8) == nullptr, "other ids do not match");
 
-    /* Re-acquiring the same screen reuses and restarts its slot. */
+    // Re-acquiring the same screen reuses and restarts its slot.
     struct video_session *again = video_engine_acquire(&eng, 7);
     EXPECT(again == a, "acquire reuses the screen's existing slot");
     EXPECT(!a->active, "previous session was stopped before reuse");
@@ -1700,9 +1954,9 @@ static int test_engine_slot_lookup_by_runtime_id(void)
 
 static int test_engine_survives_other_screen_delete(void)
 {
-    /* Regression: sessions used to be keyed by registry index, and
-     * screen_registry_delete compacts the array.  Deleting an earlier
-     * screen therefore orphaned a later screen's live session. */
+    // Regression: sessions used to be keyed by registry index, and
+    // screen_registry_delete compacts the array.  Deleting an earlier
+    // screen therefore orphaned a later screen's live session.
     struct screen_registry reg;
     screen_registry_init(&reg);
 
@@ -1718,8 +1972,8 @@ static int test_engine_survives_other_screen_delete(void)
                SCREEN_OK, "create screen alpha");
     EXPECT(screen_registry_create(&reg, "beta", "uuid-b", &geom, &idx_b) ==
                SCREEN_OK, "create screen beta");
-    uint64_t beta_id = reg.screens[idx_b].runtime_id;
-    EXPECT(beta_id != reg.screens[idx_a].runtime_id,
+    uint64_t beta_id = reg.screens[idx_b]->runtime_id;
+    EXPECT(beta_id != reg.screens[idx_a]->runtime_id,
            "runtime ids are distinct");
 
     struct video_engine eng;
@@ -1731,9 +1985,9 @@ static int test_engine_survives_other_screen_delete(void)
     EXPECT(beta != nullptr && video_session_start(beta, path, -1, beta_id, 0) == 0,
            "beta starts playing");
 
-    /* Delete the EARLIER screen: beta slides from index 1 to index 0. */
+    // Delete the EARLIER screen: beta slides from index 1 to index 0.
     EXPECT(screen_registry_delete(&reg, "alpha") == SCREEN_OK, "delete alpha");
-    EXPECT(reg.count == 1 && reg.screens[0].runtime_id == beta_id,
+    EXPECT(reg.count == 1 && reg.screens[0]->runtime_id == beta_id,
            "beta was compacted down to index 0");
 
     struct video_session *still = video_engine_find(&eng, beta_id);
@@ -1745,12 +1999,13 @@ static int test_engine_survives_other_screen_delete(void)
     EXPECT(video_session_tick(still, 500, &frame) == 1 && frame == 10,
            "beta's clock still advances");
 
-    /* Deleting beta itself releases the session. */
+    // Deleting beta itself releases the session.
     video_engine_release(&eng, beta_id);
     EXPECT(video_engine_find(&eng, beta_id) == nullptr,
            "beta's session is released with beta");
 
     video_engine_shutdown(&eng);
+    screen_registry_cleanup(&reg);
     remove(path);
     return 1;
 }
@@ -1761,7 +2016,7 @@ static int test_session_finish_releases_resources(void)
     video_engine_init(&eng);
 
     const char *path = fixture("test_finish_release.mcv");
-    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); /* 250ms of frames */
+    EXPECT(create_test_mcv(1, 1, 20, 1, 5, path), "create fixture"); // 250ms of frames
 
     struct video_session *s = video_engine_acquire(&eng, 42);
     EXPECT(s != nullptr && video_session_start(s, path, 1, 42, 0) == 0,
@@ -1773,9 +2028,9 @@ static int test_session_finish_releases_resources(void)
                s->state == PLAY_FINISHED,
            "single play finishes past the end");
 
-    /* video_tick stops the session on PLAY_FINISHED so the file handle
-     * and the multi-megabyte frame buffer are not held until an
-     * explicit /mpv stop. */
+    // video_tick stops the session on PLAY_FINISHED so the file handle
+    // and the multi-megabyte frame buffer are not held until an
+    // explicit /mpv stop.
     video_session_stop(s);
     EXPECT(s->frame_buf == nullptr && s->frame_buf_size == 0,
            "stopping a finished session frees the frame buffer");
@@ -1787,9 +2042,28 @@ static int test_session_finish_releases_resources(void)
     return 1;
 }
 
-/* ================================================================
- * SCREEN REGISTRY TESTS
- * ================================================================ */
+static int test_session_start_failure_releases_resources(void)
+{
+    struct video_session session = {0};
+    const char *path = fixture("test_start_failure_release.mcv");
+    EXPECT(create_test_mcv(1, 1, 20, 1, 1, path), "create start failure fixture");
+    patch_u8(path, MCV_HEADER_SIZE + 100, 0xFF);
+
+    int error = video_session_start(&session, path, 1, 73, 0);
+    EXPECT(error == MCV_ERR_FRAME_CRC,
+           "first-frame failure preserves its exact MCV error");
+    EXPECT(!session.active && session.state == PLAY_STOPPED &&
+               session.mcv.fp == nullptr && session.frame_buf == nullptr &&
+               session.frame_buf_size == 0 &&
+               session.mcv.stored_scratch == nullptr,
+           "failed start stops and releases all session resources");
+    remove(path);
+    return 1;
+}
+
+// ================================================================
+// SCREEN REGISTRY TESTS
+// ================================================================
 
 static int test_registry_create_find(void)
 {
@@ -1812,6 +2086,7 @@ static int test_registry_create_find(void)
     found = screen_registry_find(&reg, "nonexistent");
     EXPECT(found == -1, "find nonexistent should return -1");
 
+    screen_registry_cleanup(&reg);
     return 1;
 }
 
@@ -1827,6 +2102,7 @@ static int test_registry_duplicate_name(void)
     screen_registry_create(&reg, "test", "uuid-1", &geom, nullptr);
     enum screen_error err = screen_registry_create(&reg, "test", "uuid-2", &geom, nullptr);
     EXPECT(err == SCREEN_ERR_NAME_EXISTS, "duplicate name should fail");
+    screen_registry_cleanup(&reg);
     return 1;
 }
 
@@ -1847,6 +2123,7 @@ static int test_registry_invalid_name(void)
            "leading dot should fail");
     EXPECT(screen_registry_create(&reg, "valid-name_123", "u", &geom, nullptr) == SCREEN_OK,
            "valid name should succeed");
+    screen_registry_cleanup(&reg);
     return 1;
 }
 
@@ -1862,24 +2139,73 @@ static int test_registry_runtime_identity_survives_shifts(void)
     screen_registry_create(&reg, "a", "owner-a", &geom, nullptr);
     screen_registry_create(&reg, "b", "owner-b", &geom, nullptr);
     screen_registry_create(&reg, "c", "owner-c", &geom, nullptr);
-    uint64_t removed_id = reg.screens[1].runtime_id;
-    uint64_t shifted_id = reg.screens[2].runtime_id;
+    struct screen_entry *stable = reg.screens[2];
+    uint64_t removed_id = reg.screens[1]->runtime_id;
+    uint64_t shifted_id = reg.screens[2]->runtime_id;
     struct mpv_public_membership membership = {0};
     mpv_membership_replace(&membership, &removed_id, 1);
     EXPECT(removed_id != 0 && shifted_id != 0 && removed_id != shifted_id,
            "runtime screen identities are unique");
     EXPECT(screen_registry_delete(&reg, "b") == SCREEN_OK,
            "delete middle screen");
-    EXPECT(strcmp(reg.screens[1].name, "c") == 0 &&
-               reg.screens[1].runtime_id == shifted_id,
-           "shifted screen keeps its runtime identity");
+    EXPECT(strcmp(reg.screens[1]->name, "c") == 0 &&
+               reg.screens[1]->runtime_id == shifted_id &&
+               reg.screens[1] == stable,
+           "compaction moves pointers while entry address stays stable");
     EXPECT(mpv_membership_transition(&membership,
-                                     reg.screens[1].runtime_id, true) ==
+                                     reg.screens[1]->runtime_id, true) ==
                MPV_MEMBERSHIP_ENTERED,
            "deleted screen membership cannot attach to shifted screen");
     screen_registry_create(&reg, "d", "owner-d", &geom, nullptr);
-    EXPECT(reg.screens[2].runtime_id != removed_id,
+    EXPECT(reg.screens[2]->runtime_id != removed_id,
            "deleted runtime identity is not reused");
+    screen_registry_cleanup(&reg);
+    return 1;
+}
+
+static int test_registry_lazy_tiles_and_cleanup(void)
+{
+    struct screen_registry reg;
+    screen_registry_init(&reg);
+    struct screen_geom large = {0};
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 1023, 0},
+               (struct screen_pos){1023, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &large) == SCREEN_GEOM_OK,
+           "construct 1024x1024 registry geometry");
+    int index = -1;
+    EXPECT(screen_registry_create(&reg, "large", "owner", &large, &index) ==
+               SCREEN_OK,
+           "large logical screen should create");
+    EXPECT(reg.screens[index]->tiles == nullptr &&
+               reg.screens[index]->tiles_capacity == 0,
+           "large logical screen keeps compatibility tiles lazy");
+    EXPECT(screen_entry_materialize_tiles(reg.screens[index]) ==
+               SCREEN_ERR_MATERIALIZATION_LIMIT &&
+               reg.screens[index]->tiles == nullptr &&
+               reg.screens[index]->tiles_capacity == 0,
+           "large logical screen cannot materialize a million map records");
+
+    struct screen_geom small = {0};
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 1, 0},
+               (struct screen_pos){1, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &small) == SCREEN_GEOM_OK,
+           "construct materialization geometry");
+    int small_index = -1;
+    EXPECT(screen_registry_create(&reg, "small", "owner", &small,
+                                  &small_index) == SCREEN_OK,
+           "small logical screen should create");
+    struct screen_entry *entry = reg.screens[small_index];
+    EXPECT(screen_entry_materialize_tiles(entry) == SCREEN_OK &&
+               entry->tiles != nullptr && entry->tiles_capacity == 4,
+           "materialization allocates exactly the checked tile count");
+    EXPECT(entry->tiles[0].map_id == -1 && entry->tiles[3].map_id == -1,
+           "materialized map ids start invalid");
+    screen_registry_cleanup(&reg);
+    EXPECT(reg.count == 0, "registry cleanup releases all entries");
     return 1;
 }
 
@@ -1902,12 +2228,509 @@ static int test_registry_delete(void)
     EXPECT(screen_registry_find(&reg, "b") == -1, "b not found");
     EXPECT(screen_registry_find(&reg, "a") == 0, "a at index 0");
     EXPECT(screen_registry_find(&reg, "c") == 1, "c shifted to index 1");
+    screen_registry_cleanup(&reg);
     return 1;
 }
 
-/* ================================================================
- * PERSISTENCE TESTS
- * ================================================================ */
+// ================================================================
+// PERSISTENCE TESTS
+// ================================================================
+
+static unsigned char *persistence_read_bytes(const char *path, size_t *size_out)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file)
+        return nullptr;
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return nullptr;
+    }
+    long length = ftell(file);
+    if (length < 0) {
+        fclose(file);
+        return nullptr;
+    }
+    rewind(file);
+    unsigned char *data = calloc((size_t)length + 1, 1);
+    if (!data) {
+        fclose(file);
+        return nullptr;
+    }
+    size_t read_count = fread(data, 1, (size_t)length, file);
+    fclose(file);
+    if (read_count != (size_t)length) {
+        free(data);
+        return nullptr;
+    }
+    if (size_out)
+        *size_out = (size_t)length;
+    return data;
+}
+
+static int persistence_write_bytes(const char *path, const void *data,
+                                   size_t size)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file)
+        return -1;
+    int ok = fwrite(data, 1, size, file) == size;
+    if (fclose(file) != 0)
+        ok = 0;
+    return ok ? 0 : -1;
+}
+
+static uint32_t persistence_read_u32_le(const unsigned char *data)
+{
+    return (uint32_t)data[0] | (uint32_t)data[1] << 8 |
+           (uint32_t)data[2] << 16 | (uint32_t)data[3] << 24;
+}
+
+static void persistence_write_u32_le(unsigned char *data, uint32_t value)
+{
+    for (int i = 0; i < 4; i++)
+        data[i] = (unsigned char)(value >> (8 * i));
+}
+
+static char *persistence_sidecar_path(const char *manifest_path)
+{
+    size_t manifest_size = 0;
+    unsigned char *manifest = persistence_read_bytes(manifest_path,
+                                                       &manifest_size);
+    if (!manifest)
+        return nullptr;
+    cJSON *root = cJSON_Parse((const char *)manifest);
+    free(manifest);
+    if (!root)
+        return nullptr;
+    cJSON *field = cJSON_GetObjectItemCaseSensitive(
+        root, SCREEN_SIDECAR_FIELD);
+    if (!cJSON_IsString(field) || !field->valuestring[0]) {
+        cJSON_Delete(root);
+        return nullptr;
+    }
+
+    const char *separator = strrchr(manifest_path, '/');
+    const char *backslash = strrchr(manifest_path, '\\');
+    if (backslash && (!separator || backslash > separator))
+        separator = backslash;
+    size_t directory_length = separator
+                                  ? (size_t)(separator - manifest_path + 1)
+                                  : 0;
+    size_t sidecar_length = strlen(field->valuestring);
+    char *result = calloc(directory_length + sidecar_length + 1, 1);
+    if (result) {
+        memcpy(result, manifest_path, directory_length);
+        memcpy(result + directory_length, field->valuestring,
+               sidecar_length);
+    }
+    cJSON_Delete(root);
+    return result;
+}
+
+static int persistence_update_ref(const char *manifest_path, const char *key,
+                                  const char *value)
+{
+    size_t manifest_size = 0;
+    unsigned char *manifest = persistence_read_bytes(manifest_path,
+                                                       &manifest_size);
+    if (!manifest)
+        return -1;
+    cJSON *root = cJSON_Parse((const char *)manifest);
+    free(manifest);
+    if (!root)
+        return -1;
+    cJSON *screens = cJSON_GetObjectItemCaseSensitive(root, "screens");
+    cJSON *screen = cJSON_GetArrayItem(screens, 0);
+    cJSON *ref = cJSON_GetObjectItemCaseSensitive(screen, "map_ids");
+    cJSON *replacement = cJSON_CreateString(value);
+    if (!cJSON_IsArray(screens) || !cJSON_IsObject(screen) ||
+        !cJSON_IsObject(ref) || !replacement ||
+        !cJSON_ReplaceItemInObjectCaseSensitive(ref, key, replacement)) {
+        cJSON_Delete(replacement);
+        cJSON_Delete(root);
+        return -1;
+    }
+    replacement = nullptr;
+    char *rewritten = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!rewritten)
+        return -1;
+    int result = persistence_write_bytes(manifest_path, rewritten,
+                                         strlen(rewritten));
+    free(rewritten);
+    return result;
+}
+
+static int persistence_seed_destination(struct screen_registry *reg,
+                                        struct screen_entry **entry_out)
+{
+    screen_registry_init(reg);
+    struct screen_geom geom;
+    if (screen_geom_validate(
+            (struct screen_pos){0, 64, 0},
+            (struct screen_pos){0, 64, 0},
+            "minecraft:overworld", "minecraft:overworld",
+            SCREEN_FACE_SOUTH, &geom) != SCREEN_GEOM_OK)
+        return -1;
+    int index = -1;
+    if (screen_registry_create(reg, "sentinel", "owner", &geom, &index) !=
+        SCREEN_OK)
+        return -1;
+    if (entry_out)
+        *entry_out = reg->screens[index];
+    return 0;
+}
+
+static int persistence_load_failure_preserves(const char *path)
+{
+    struct screen_registry destination;
+    struct screen_entry *sentinel = nullptr;
+    if (persistence_seed_destination(&destination, &sentinel) != 0)
+        return 0;
+    int warnings = 0;
+    int result = screen_persistence_load(&destination, path, &warnings);
+    int preserved = result == -1 && warnings == 1 &&
+                    destination.count == 1 &&
+                    destination.screens[0] == sentinel &&
+                    strcmp(destination.screens[0]->name, "sentinel") == 0;
+    screen_registry_cleanup(&destination);
+    return preserved;
+}
+
+static int test_persistence_v1_migration_and_extremes(void)
+{
+    const char *path = fixture("test_persistence_v1.json");
+    remove_persistence_artifacts(path);
+    FILE *file = fopen(path, "wb");
+    EXPECT(file != nullptr, "open v1 migration fixture");
+    fprintf(file,
+            "{\"format_version\":1,\"screens\":[{"
+            "\"name\":\"legacy-managed\",\"owner_uuid\":\"owner\","
+            "\"dimension\":\"minecraft:overworld\",\"facing\":0,"
+            "\"width\":2,\"height\":1,"
+            "\"corner1\":{\"x\":0,\"y\":64,\"z\":0},"
+            "\"corner2\":{\"x\":1,\"y\":64,\"z\":0},"
+            "\"created_at\":1700000000,\"plugin_managed\":true,"
+            "\"map_ids\":[\"-9223372036854775808\","
+            "\"9223372036854775807\"]}]}");
+    fclose(file);
+
+    struct screen_registry loaded;
+    screen_registry_init(&loaded);
+    int warnings = 0;
+    EXPECT(screen_persistence_load(&loaded, path, &warnings) == 0 &&
+               warnings == 0 && loaded.count == 1,
+           "v1 managed fixture loads");
+    EXPECT(loaded.screens[0]->plugin_managed &&
+               loaded.screens[0]->tiles[0].map_id_valid &&
+               loaded.screens[0]->tiles[0].map_id == INT64_MIN &&
+               loaded.screens[0]->tiles[1].map_id == INT64_MAX,
+           "v1 map IDs preserve both int64 extremes");
+    EXPECT(screen_persistence_save(&loaded, path) == 0,
+           "v1 fixture saves as v2");
+
+    size_t manifest_size = 0;
+    unsigned char *manifest = persistence_read_bytes(path, &manifest_size);
+    EXPECT(manifest != nullptr && manifest_size < 4096,
+           "migrated manifest remains compact");
+    EXPECT(strstr((const char *)manifest, "\"format_version\":2") != nullptr,
+           "migrated manifest uses v2");
+    EXPECT(strstr((const char *)manifest, "\"map_ids\":[") == nullptr &&
+               strstr((const char *)manifest, "\"map_ids\":{") != nullptr,
+           "v2 never emits a map_ids JSON array");
+    free(manifest);
+    char *sidecar = persistence_sidecar_path(path);
+    EXPECT(sidecar != nullptr, "v2 manifest names a sidecar basename");
+    FILE *sidecar_file = sidecar ? fopen(sidecar, "rb") : nullptr;
+    EXPECT(sidecar_file != nullptr, "migrated sidecar exists beside manifest");
+    if (sidecar_file)
+        fclose(sidecar_file);
+    free(sidecar);
+
+    screen_registry_cleanup(&loaded);
+    remove_persistence_artifacts(path);
+    return 1;
+}
+
+static int test_persistence_v2_roundtrip_and_logical_size(void)
+{
+    const char *path = fixture("test_persistence_v2.json");
+    const char *logical_path = fixture("test_persistence_logical.json");
+    remove_persistence_artifacts(path);
+    remove_persistence_artifacts(logical_path);
+
+    struct screen_registry registry;
+    screen_registry_init(&registry);
+    struct screen_geom geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 64, 0},
+               (struct screen_pos){1, 64, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &geom) == SCREEN_GEOM_OK,
+           "construct exact v2 geometry");
+    int index = -1;
+    EXPECT(screen_registry_create(&registry, "exact", "owner", &geom, &index) ==
+               SCREEN_OK,
+           "create exact v2 screen");
+    struct screen_entry *entry = registry.screens[index];
+    entry->plugin_managed = 1;
+    EXPECT(screen_entry_materialize_tiles(entry) == SCREEN_OK,
+           "materialize exact v2 tiles");
+    entry->tiles[0].map_id = INT64_MIN;
+    entry->tiles[0].map_id_valid = 1;
+    entry->tiles[1].map_id = INT64_MAX;
+    entry->tiles[1].map_id_valid = 1;
+    EXPECT(screen_persistence_save(&registry, path) == 0,
+           "save exact v2 IDs");
+    size_t committed_manifest_size = 0;
+    unsigned char *committed_manifest = persistence_read_bytes(
+        path, &committed_manifest_size);
+    EXPECT(committed_manifest != nullptr,
+           "read committed manifest before deterministic save failure");
+    entry->tiles[1].map_id_valid = 0;
+    EXPECT(screen_persistence_save(&registry, path) == -1,
+           "incomplete physical map IDs reject the save");
+    size_t preserved_manifest_size = 0;
+    unsigned char *preserved_manifest = persistence_read_bytes(
+        path, &preserved_manifest_size);
+    EXPECT(preserved_manifest != nullptr &&
+               preserved_manifest_size == committed_manifest_size &&
+               memcmp(preserved_manifest, committed_manifest,
+                      committed_manifest_size) == 0,
+           "failed save leaves the committed manifest byte-exact");
+    free(preserved_manifest);
+    free(committed_manifest);
+    entry->tiles[1].map_id_valid = 1;
+    screen_registry_cleanup(&registry);
+
+    struct screen_registry loaded;
+    screen_registry_init(&loaded);
+    int warnings = 0;
+    EXPECT(screen_persistence_load(&loaded, path, &warnings) == 0 &&
+               warnings == 0 && loaded.count == 1,
+           "load exact v2 IDs");
+    EXPECT(loaded.screens[0]->tiles[0].map_id == INT64_MIN &&
+               loaded.screens[0]->tiles[1].map_id == INT64_MAX &&
+               loaded.screens[0]->tiles[0].map_id_valid &&
+               loaded.screens[0]->tiles[1].map_id_valid,
+           "v2 sidecar roundtrip preserves exact IDs");
+    screen_registry_cleanup(&loaded);
+
+    screen_registry_init(&registry);
+    struct screen_geom large_geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 63, 0},
+               (struct screen_pos){63, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &large_geom) == SCREEN_GEOM_OK,
+           "construct moderately large materialized geometry");
+    EXPECT(screen_registry_create(&registry, "large", "owner", &large_geom,
+                                  &index) == SCREEN_OK,
+           "create moderately large screen");
+    entry = registry.screens[index];
+    entry->plugin_managed = 1;
+    EXPECT(screen_entry_materialize_tiles(entry) == SCREEN_OK,
+           "materialize moderately large screen");
+    for (int tile = 0; tile < screen_geom_tile_count(&large_geom); tile++) {
+        entry->tiles[tile].map_id = INT64_C(1000000) + tile;
+        entry->tiles[tile].map_id_valid = 1;
+    }
+    // The next save publishes a new content-derived generation; explicitly
+    // remove the prior generation so this test leaves no orphan sidecar.
+    remove_manifest_sidecar(path);
+    EXPECT(screen_persistence_save(&registry, path) == 0,
+           "save moderately large screen");
+    size_t large_manifest_size = 0;
+    unsigned char *large_manifest = persistence_read_bytes(
+        path, &large_manifest_size);
+    EXPECT(large_manifest != nullptr && large_manifest_size < 4096,
+           "manifest remains bounded by screen count, not tile count");
+    free(large_manifest);
+    screen_registry_cleanup(&registry);
+
+    screen_registry_init(&registry);
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 1023, 0},
+               (struct screen_pos){1023, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &large_geom) == SCREEN_GEOM_OK,
+           "construct logical 1024x1024 geometry");
+    EXPECT(screen_registry_create(&registry, "logical", "owner", &large_geom,
+                                  nullptr) == SCREEN_OK,
+           "create logical 1024x1024 screen");
+    EXPECT(screen_persistence_save(&registry, logical_path) == 0,
+           "save logical screen");
+    size_t logical_manifest_size = 0;
+    unsigned char *logical_manifest = persistence_read_bytes(
+        logical_path, &logical_manifest_size);
+    EXPECT(logical_manifest != nullptr &&
+               strstr((const char *)logical_manifest,
+                      "\"" SCREEN_SIDECAR_FIELD "\"") == nullptr &&
+               strstr((const char *)logical_manifest, "\"map_ids\"") == nullptr,
+           "logical screen emits no sidecar or map ID reference");
+    free(logical_manifest);
+    screen_registry_cleanup(&registry);
+    remove_persistence_artifacts(path);
+    remove_persistence_artifacts(logical_path);
+    return 1;
+}
+
+static int test_persistence_sidecar_corruption_matrix(void)
+{
+    const char *path = fixture("test_persistence_corruption.json");
+    remove_persistence_artifacts(path);
+
+    struct screen_registry registry;
+    screen_registry_init(&registry);
+    struct screen_geom geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 64, 0},
+               (struct screen_pos){1, 64, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &geom) == SCREEN_GEOM_OK,
+           "construct corruption matrix geometry");
+    int index = -1;
+    EXPECT(screen_registry_create(&registry, "managed", "owner", &geom,
+                                  &index) == SCREEN_OK,
+           "create corruption matrix screen");
+    struct screen_entry *entry = registry.screens[index];
+    entry->plugin_managed = 1;
+    EXPECT(screen_entry_materialize_tiles(entry) == SCREEN_OK,
+           "materialize corruption matrix tiles");
+    entry->tiles[0].map_id = INT64_C(-77);
+    entry->tiles[1].map_id = INT64_C(88);
+    entry->tiles[0].map_id_valid = 1;
+    entry->tiles[1].map_id_valid = 1;
+    EXPECT(screen_persistence_save(&registry, path) == 0,
+           "save corruption matrix fixture");
+    screen_registry_cleanup(&registry);
+
+    size_t manifest_size = 0;
+    unsigned char *manifest_original = persistence_read_bytes(
+        path, &manifest_size);
+    char *sidecar_path = persistence_sidecar_path(path);
+    size_t sidecar_size = 0;
+    unsigned char *sidecar_original = sidecar_path
+                                          ? persistence_read_bytes(
+                                                sidecar_path, &sidecar_size)
+                                          : nullptr;
+    EXPECT(manifest_original != nullptr && sidecar_path != nullptr &&
+               sidecar_original != nullptr && sidecar_size >= 40,
+           "read corruption matrix files");
+    EXPECT(strstr((const char *)manifest_original,
+                  "\"" SCREEN_SIDECAR_FIELD "\"") != nullptr,
+           "corruption matrix manifest references sidecar");
+
+    // Ensure the first two diagnostic copies exercise .bad and .bad.1.
+    remove("test_persistence_corruption.json.bad");
+    remove("test_persistence_corruption.json.bad.1");
+    unsigned char *first_bad = nullptr;
+    size_t first_bad_size = 0;
+    for (int case_index = 0; case_index < 5; case_index++) {
+        unsigned char *mutated = calloc(sidecar_size, 1);
+        EXPECT(mutated != nullptr, "allocate sidecar corruption copy");
+        memcpy(mutated, sidecar_original, sidecar_size);
+        size_t written_size = sidecar_size;
+        if (case_index == 0) {
+            mutated[0] ^= 0x01;
+        } else if (case_index == 1) {
+            mutated[8] ^= 0x01;
+        } else if (case_index == 2) {
+            written_size--;
+        } else if (case_index == 3) {
+            mutated[sidecar_size - 1] ^= 0x01;
+        } else {
+            mutated[sidecar_size - 1] ^= 0x01;
+            uint32_t crc = (uint32_t)mz_crc32(
+                MZ_CRC32_INIT, mutated + SCREEN_SIDECAR_HEADER_SIZE,
+                sidecar_size - SCREEN_SIDECAR_HEADER_SIZE);
+            persistence_write_u32_le(mutated + 20, crc);
+        }
+        EXPECT(persistence_write_bytes(sidecar_path, mutated, written_size) ==
+                   0,
+               "write sidecar corruption case");
+        size_t before_manifest_size = 0;
+        unsigned char *before_manifest = persistence_read_bytes(
+            path, &before_manifest_size);
+        EXPECT(before_manifest != nullptr &&
+                   before_manifest_size == manifest_size &&
+                   memcmp(before_manifest, manifest_original,
+                          manifest_size) == 0,
+               "manifest is intact before sidecar failure");
+        free(before_manifest);
+        EXPECT(persistence_load_failure_preserves(path),
+               "sidecar failure preserves populated destination");
+        size_t after_manifest_size = 0;
+        unsigned char *after_manifest = persistence_read_bytes(
+            path, &after_manifest_size);
+        size_t after_sidecar_size = 0;
+        unsigned char *after_sidecar = persistence_read_bytes(
+            sidecar_path, &after_sidecar_size);
+        EXPECT(after_manifest != nullptr && after_manifest_size == manifest_size &&
+                   memcmp(after_manifest, manifest_original, manifest_size) == 0 &&
+                   after_sidecar != nullptr && after_sidecar_size == written_size &&
+                   memcmp(after_sidecar, mutated, written_size) == 0,
+               "sidecar and manifest remain unchanged after failure");
+        free(after_manifest);
+        free(after_sidecar);
+        free(mutated);
+
+        if (case_index == 0) {
+            first_bad = persistence_read_bytes(
+                "test_persistence_corruption.json.bad", &first_bad_size);
+            EXPECT(first_bad != nullptr && first_bad_size == manifest_size &&
+                       memcmp(first_bad, manifest_original, manifest_size) == 0,
+                   "first diagnostic copy is exact");
+        }
+        if (case_index == 1) {
+            size_t second_bad_size = 0;
+            unsigned char *second_bad = persistence_read_bytes(
+                "test_persistence_corruption.json.bad.1", &second_bad_size);
+            EXPECT(second_bad != nullptr && second_bad_size == manifest_size &&
+                       memcmp(second_bad, manifest_original, manifest_size) == 0 &&
+                       first_bad != nullptr && first_bad_size == manifest_size &&
+                       memcmp(first_bad, manifest_original, manifest_size) == 0,
+                   "successive diagnostic copy never overwrites .bad");
+            free(second_bad);
+        }
+    }
+    free(first_bad);
+
+    // A changed global checksum must not hide a per-screen checksum error.
+    EXPECT(persistence_write_bytes(sidecar_path, sidecar_original,
+                                   sidecar_size) == 0,
+           "restore sidecar before reference cases");
+    EXPECT(persistence_write_bytes(path, manifest_original, manifest_size) == 0,
+           "restore manifest before reference cases");
+    EXPECT(persistence_update_ref(path, "offset", "999999999") == 0,
+           "write out-of-range reference");
+    EXPECT(persistence_load_failure_preserves(path),
+           "out-of-range reference preserves destination");
+    size_t range_manifest_size = 0;
+    unsigned char *range_manifest = persistence_read_bytes(
+        path, &range_manifest_size);
+    EXPECT(range_manifest != nullptr && range_manifest_size > 0,
+           "range-corrupt manifest remains present");
+    free(range_manifest);
+    EXPECT(persistence_write_bytes(path, manifest_original, manifest_size) == 0,
+           "restore manifest before count case");
+    EXPECT(persistence_update_ref(path, "count", "3") == 0,
+           "write mismatched reference count");
+    EXPECT(persistence_load_failure_preserves(path),
+           "mismatched reference count preserves destination");
+    size_t count_manifest_size = 0;
+    unsigned char *count_manifest = persistence_read_bytes(
+        path, &count_manifest_size);
+    EXPECT(count_manifest != nullptr && count_manifest_size > 0,
+           "count-corrupt manifest remains present");
+    free(count_manifest);
+
+    free(manifest_original);
+    free(sidecar_original);
+    free(sidecar_path);
+    remove_persistence_artifacts(path);
+    return 1;
+}
 
 static int test_persistence_roundtrip(void)
 {
@@ -1922,9 +2745,9 @@ static int test_persistence_roundtrip(void)
 
     int idx;
     screen_registry_create(&reg, "lobby", "owner-uuid-1234", &geom, &idx);
-    reg.screens[idx].created_at = 1700000000;
+    reg.screens[idx]->created_at = 1700000000;
 
-    /* Second screen */
+    // Second screen
     struct screen_pos c3 = {0, 65, 0}, c4 = {0, 63, 3};
     struct screen_geom geom2;
     screen_geom_validate(c3, c4, "minecraft:nether", "minecraft:nether", SCREEN_FACE_EAST, &geom2);
@@ -1932,8 +2755,9 @@ static int test_persistence_roundtrip(void)
 
     EXPECT(screen_persistence_save(&reg, path) == 0, "save should succeed");
 
-    /* Load into fresh registry */
+    // Load into fresh registry
     struct screen_registry reg2;
+    screen_registry_init(&reg2);
     int warnings = 0;
     EXPECT(screen_persistence_load(&reg2, path, &warnings) == 0, "load should succeed");
     EXPECT(warnings == 0, "no warnings");
@@ -1941,17 +2765,19 @@ static int test_persistence_roundtrip(void)
 
     int li = screen_registry_find(&reg2, "lobby");
     EXPECT(li >= 0, "lobby found");
-    EXPECT(strcmp(reg2.screens[li].owner_uuid, "owner-uuid-1234") == 0, "owner preserved");
-    EXPECT(reg2.screens[li].geom.width == 4, "width preserved");
-    EXPECT(reg2.screens[li].geom.height == 4, "height preserved");
-    EXPECT(reg2.screens[li].geom.facing == SCREEN_FACE_SOUTH, "facing preserved");
-    EXPECT(reg2.screens[li].created_at == 1700000000, "created_at preserved");
+    EXPECT(strcmp(reg2.screens[li]->owner_uuid, "owner-uuid-1234") == 0, "owner preserved");
+    EXPECT(reg2.screens[li]->geom.width == 4, "width preserved");
+    EXPECT(reg2.screens[li]->geom.height == 4, "height preserved");
+    EXPECT(reg2.screens[li]->geom.facing == SCREEN_FACE_SOUTH, "facing preserved");
+    EXPECT(reg2.screens[li]->created_at == 1700000000, "created_at preserved");
 
     int ni = screen_registry_find(&reg2, "nether-screen");
     EXPECT(ni >= 0, "nether-screen found");
-    EXPECT(strcmp(reg2.screens[ni].geom.dimension, "minecraft:nether") == 0, "dimension preserved");
-    EXPECT(reg2.screens[ni].geom.facing == SCREEN_FACE_EAST, "east facing preserved");
+    EXPECT(strcmp(reg2.screens[ni]->geom.dimension, "minecraft:nether") == 0, "dimension preserved");
+    EXPECT(reg2.screens[ni]->geom.facing == SCREEN_FACE_EAST, "east facing preserved");
 
+    screen_registry_cleanup(&reg);
+    screen_registry_cleanup(&reg2);
     remove(path);
     return 1;
 }
@@ -2001,11 +2827,12 @@ static int test_persistence_omits_and_ignores_viewers(void)
     fclose(legacy);
 
     struct screen_registry loaded;
+    screen_registry_init(&loaded);
     int warnings = 0;
     EXPECT(screen_persistence_load(&loaded, path, &warnings) == 0 &&
                warnings == 0 && loaded.count == 1,
            "legacy viewers field is tolerated and ignored");
-    EXPECT(strcmp(loaded.screens[0].owner_uuid, "owner-kept") == 0,
+    EXPECT(strcmp(loaded.screens[0]->owner_uuid, "owner-kept") == 0,
            "owner metadata remains preserved");
     EXPECT(screen_persistence_save(&loaded, rewritten_path) == 0,
            "legacy screen rewrites in public format");
@@ -2023,6 +2850,8 @@ static int test_persistence_omits_and_ignores_viewers(void)
     EXPECT(strstr(saved_json, "\"viewers\"") == nullptr,
            "obsolete viewers disappear after successful save");
     free(saved_json);
+    screen_registry_cleanup(&registry);
+    screen_registry_cleanup(&loaded);
     remove(path);
     remove(rewritten_path);
     return 1;
@@ -2030,25 +2859,26 @@ static int test_persistence_omits_and_ignores_viewers(void)
 
 static int test_persistence_facing_range(void)
 {
-    /* screen_geom_tile_pos indexes a static 4-entry table with the
-     * facing value, so a tampered file must be rejected at load. */
+    // screen_geom_tile_pos indexes a static 4-entry table with the
+    // facing value, so a tampered file must be rejected at load.
     const char *path = fixture("test_facing_range.json");
     struct screen_registry loaded;
+    screen_registry_init(&loaded);
 
     static const struct {
         const char *facing;
         int accepted;
     } cases[] = {
-        {"0", 1}, {"3", 1},         /* SOUTH .. WEST are the valid range */
+        {"0", 1}, {"3", 1},         // SOUTH .. WEST are the valid range
         {"4", 0}, {"-1", 0}, {"99", 0},
-        {"\"south\"", 0},           /* non-numeric facing */
+        {"\"south\"", 0},           // non-numeric facing
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         FILE *f = fopen(path, "wb");
         EXPECT(f != nullptr, "open facing fixture");
         fprintf(f,
-                "{\"format_version\":2,\"screens\":[{"
+                "{\"format_version\":1,\"screens\":[{"
                 "\"name\":\"probe\",\"owner_uuid\":\"owner\","
                 "\"dimension\":\"minecraft:overworld\",\"facing\":%s,"
                 "\"width\":1,\"height\":1,"
@@ -2063,8 +2893,8 @@ static int test_persistence_facing_range(void)
         if (cases[i].accepted) {
             EXPECT(loaded.count == 1 && warnings == 0,
                    "in-range facing loads without warnings");
-            EXPECT(loaded.screens[0].geom.facing >= SCREEN_FACE_SOUTH &&
-                       loaded.screens[0].geom.facing <= SCREEN_FACE_WEST,
+            EXPECT(loaded.screens[0]->geom.facing >= SCREEN_FACE_SOUTH &&
+                       loaded.screens[0]->geom.facing <= SCREEN_FACE_WEST,
                    "loaded facing stays inside the table");
         } else {
             EXPECT(loaded.count == 0 && warnings == 1,
@@ -2091,27 +2921,32 @@ static int test_managed_map_identity_roundtrip(void)
     EXPECT(screen_registry_create(&registry, "managed", "owner", &geometry,
                                   &index) == SCREEN_OK,
            "create managed persistence entry");
-    registry.screens[index].plugin_managed = 1;
-    registry.screens[index].tiles[0].map_id = INT64_C(-1507533518726);
-    registry.screens[index].tiles[0].map_id_valid = 1;
+    registry.screens[index]->plugin_managed = 1;
+    EXPECT(screen_entry_materialize_tiles(registry.screens[index]) == SCREEN_OK,
+           "materialize managed persistence tiles");
+    registry.screens[index]->tiles[0].map_id = INT64_C(-1507533518726);
+    registry.screens[index]->tiles[0].map_id_valid = 1;
     EXPECT(screen_persistence_save(&registry, path) == 0,
            "persist managed map identity");
 
     struct screen_registry loaded;
+    screen_registry_init(&loaded);
     int warnings = 0;
     EXPECT(screen_persistence_load(&loaded, path, &warnings) == 0 &&
                warnings == 0,
            "load managed map identity");
     int loaded_index = screen_registry_find(&loaded, "managed");
-    EXPECT(loaded_index >= 0 && loaded.screens[loaded_index].plugin_managed,
+    EXPECT(loaded_index >= 0 && loaded.screens[loaded_index]->plugin_managed,
            "managed ownership marker survives restart");
-    EXPECT(loaded.screens[loaded_index].tiles[0].map_id_valid &&
-               loaded.screens[loaded_index].tiles[0].map_id ==
+    EXPECT(loaded.screens[loaded_index]->tiles[0].map_id_valid &&
+               loaded.screens[loaded_index]->tiles[0].map_id ==
                    INT64_C(-1507533518726),
            "int64 map id survives restart exactly");
-    EXPECT(!loaded.screens[loaded_index].tiles_initialized &&
-               loaded.screens[loaded_index].tiles[0].map_view == nullptr,
+    EXPECT(!loaded.screens[loaded_index]->tiles_initialized &&
+               loaded.screens[loaded_index]->tiles[0].map_view == nullptr,
            "runtime map pointers are not persisted");
+    screen_registry_cleanup(&registry);
+    screen_registry_cleanup(&loaded);
     remove(path);
     return 1;
 }
@@ -2119,57 +2954,124 @@ static int test_managed_map_identity_roundtrip(void)
 static int test_persistence_corrupted(void)
 {
     const char *path = fixture("test_corrupt.json");
+    remove_persistence_artifacts(path);
 
-    /* Write garbage */
+    // Write garbage
     FILE *f = fopen(path, "w");
     fprintf(f, "{invalid json!!!}}}");
     fclose(f);
 
     struct screen_registry reg;
+    screen_registry_init(&reg);
+    struct screen_geom sentinel_geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 64, 0},
+               (struct screen_pos){0, 64, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &sentinel_geom) == SCREEN_GEOM_OK,
+           "construct corrupt-load sentinel geometry");
+    int sentinel_index = -1;
+    EXPECT(screen_registry_create(&reg, "sentinel", "owner",
+                                  &sentinel_geom, &sentinel_index) == SCREEN_OK,
+           "create corrupt-load sentinel");
+    struct screen_entry *sentinel = reg.screens[sentinel_index];
     int warnings = 0;
     int ret = screen_persistence_load(&reg, path, &warnings);
     EXPECT(ret == -1, "corrupted JSON should return -1");
-    EXPECT(reg.count == 0, "no screens loaded from corrupt file");
+    EXPECT(reg.count == 1 && reg.screens[0] == sentinel &&
+               strcmp(reg.screens[0]->name, "sentinel") == 0,
+           "corrupt load preserves populated destination");
     EXPECT(warnings == 1, "corrupt file is reported as a warning");
 
-    /* The loader moves the unreadable file aside so a later save cannot
-     * overwrite it. */
+    // The loader copies the unreadable file aside without moving or
+    // overwriting the original.
     FILE *aside = fopen("test_corrupt.json.bad", "rb");
     EXPECT(aside != nullptr, "corrupt file is preserved as .bad");
     fclose(aside);
     aside = fopen(path, "rb");
-    EXPECT(aside == nullptr, "original path is free for the next save");
+    EXPECT(aside != nullptr, "original corrupt path remains present");
+    if (aside)
+        fclose(aside);
 
-    remove(path);
-    remove("test_corrupt.json.bad");
+    screen_registry_cleanup(&reg);
+    remove_persistence_artifacts(path);
     return 1;
 }
 
 static int test_persistence_truncated(void)
 {
     const char *path = fixture("test_trunc.json");
+    remove_persistence_artifacts(path);
 
     FILE *f = fopen(path, "w");
     fprintf(f, "{\"format_version\": 1, \"screens\": [{\"name\": \"ok\", \"owner_uuid\": \"u\", ");
-    fclose(f); /* truncated mid-object */
+    fclose(f); // truncated mid-object
+    size_t original_size = 0;
+    unsigned char *original = persistence_read_bytes(path, &original_size);
+    EXPECT(original != nullptr, "read truncated manifest bytes");
 
     struct screen_registry reg;
+    screen_registry_init(&reg);
+    struct screen_geom sentinel_geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 64, 0},
+               (struct screen_pos){0, 64, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &sentinel_geom) == SCREEN_GEOM_OK,
+           "construct truncation sentinel geometry");
+    EXPECT(screen_registry_create(&reg, "sentinel", "owner",
+                                  &sentinel_geom, nullptr) == SCREEN_OK,
+           "create truncation sentinel");
+    struct screen_entry *sentinel = reg.screens[0];
     int warnings = 0;
     int ret = screen_persistence_load(&reg, path, &warnings);
-    /* cJSON may parse partial JSON or fail - either way shouldn't crash */
-    EXPECT(reg.count == 0 || warnings > 0 || ret == -1, "truncated file handled gracefully");
+    EXPECT(ret == -1 && reg.count == 1 && reg.screens[0] == sentinel,
+           "truncated load preserves populated destination");
+    size_t after_size = 0;
+    unsigned char *after = persistence_read_bytes(path, &after_size);
+    EXPECT(after != nullptr && after_size == original_size &&
+               memcmp(after, original, original_size) == 0,
+           "truncated manifest remains unchanged");
+    free(after);
+    size_t bad_size = 0;
+    unsigned char *bad = persistence_read_bytes("test_trunc.json.bad",
+                                                 &bad_size);
+    EXPECT(bad != nullptr && bad_size == original_size &&
+               memcmp(bad, original, original_size) == 0,
+           "truncated manifest diagnostic is an exact copy");
+    free(bad);
+    free(original);
 
-    remove(path);
+    screen_registry_cleanup(&reg);
+    remove_persistence_artifacts(path);
     return 1;
 }
 
 static int test_persistence_missing_file(void)
 {
+    const char *path = "nonexistent_file_xyz.json";
+    remove_persistence_artifacts(path);
     struct screen_registry reg;
+    screen_registry_init(&reg);
+    struct screen_geom sentinel_geom;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 64, 0},
+               (struct screen_pos){0, 64, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &sentinel_geom) == SCREEN_GEOM_OK,
+           "construct missing-file sentinel geometry");
+    EXPECT(screen_registry_create(&reg, "sentinel", "owner",
+                                  &sentinel_geom, nullptr) == SCREEN_OK,
+           "create missing-file sentinel");
+    struct screen_entry *sentinel = reg.screens[0];
     int warnings = 0;
-    int ret = screen_persistence_load(&reg, "nonexistent_file_xyz.json", &warnings);
+    int ret = screen_persistence_load(&reg, path, &warnings);
     EXPECT(ret == 0, "missing file should return 0 (not an error)");
-    EXPECT(reg.count == 0, "no screens from missing file");
+    EXPECT(reg.count == 1 && reg.screens[0] == sentinel &&
+               strcmp(reg.screens[0]->name, "sentinel") == 0 &&
+               warnings == 0,
+           "missing file leaves destination untouched");
+    screen_registry_cleanup(&reg);
     return 1;
 }
 
@@ -2179,12 +3081,13 @@ static int test_persistence_invalid_dimensions(void)
 
     FILE *f = fopen(path, "w");
     fprintf(f, "{\"format_version\":1,\"screens\":[{\"name\":\"bad\",\"owner_uuid\":\"u\","
-               "\"dimension\":\"minecraft:overworld\",\"facing\":0,\"width\":99,\"height\":99,"
+               "\"dimension\":\"minecraft:overworld\",\"facing\":0,\"width\":1025,\"height\":1025,"
                "\"corner1\":{\"x\":0,\"y\":65,\"z\":0},\"corner2\":{\"x\":1,\"y\":65,\"z\":0},"
                "\"viewers\":[]}]}");
     fclose(f);
 
     struct screen_registry reg;
+    screen_registry_init(&reg);
     int warnings = 0;
     screen_persistence_load(&reg, path, &warnings);
     EXPECT(reg.count == 0, "invalid dimensions should be skipped");
@@ -2298,9 +3201,9 @@ static int test_detailed_tick_reports_loop_boundary(void)
     return 1;
 }
 
-/* ================================================================
- * COMMAND AND PUBLIC VIEWER POLICY TESTS
- * ================================================================ */
+// ================================================================
+// COMMAND AND PUBLIC VIEWER POLICY TESTS
+// ================================================================
 
 static int test_command_permission_and_surface(void)
 {
@@ -2327,13 +3230,16 @@ static int test_command_permission_and_surface(void)
         "(bind)", "(unbind)",
     };
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
-    EXPECT(MPV_COMMAND_USAGE_COUNT == 14,
-           "debug build registers exactly 14 usages");
+    EXPECT(MPV_COMMAND_USAGE_COUNT == 17,
+           "debug build registers exactly 17 usages");
 #else
-    EXPECT(MPV_COMMAND_USAGE_COUNT == 13,
-           "default build registers exactly 13 usages");
+    EXPECT(MPV_COMMAND_USAGE_COUNT == 16,
+           "default build registers exactly 16 usages");
 #endif
     EXPECT(strcmp(mpv_command_usages[5],
+                   "/mpv (materialize)<a: MpvMaterialize> <name: string>") == 0,
+           "materialize command is adjacent to create");
+    EXPECT(strcmp(mpv_command_usages[6],
                    "/mpv (delete)<a: MpvDelete> <name: string>") == 0,
            "delete command has no confirmation parameter");
     for (int i = 0; i < MPV_COMMAND_USAGE_COUNT; i++) {
@@ -2344,7 +3250,10 @@ static int test_command_permission_and_surface(void)
     }
     EXPECT(mpv_command_action_registered("") &&
                mpv_command_action_registered("help") &&
-               mpv_command_action_registered("watch"),
+               mpv_command_action_registered("watch") &&
+               mpv_command_action_registered("materialize") &&
+               mpv_command_action_registered("images") &&
+               mpv_command_action_registered("image"),
            "root, help and watch remain registered");
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
     EXPECT(mpv_command_action_registered("debug"),
@@ -2360,6 +3269,68 @@ static int test_command_permission_and_surface(void)
                !mpv_command_action_registered("bind") &&
                !mpv_command_action_registered("unbind"),
            "all six obsolete actions are rejected");
+    return 1;
+}
+
+static int test_mps_catalog_and_source_lifecycle(void)
+{
+    const char *directory = "test_mps_catalog_runtime";
+    const char *valid_path = "test_mps_catalog_runtime/valid.mps";
+    const char *bad_path = "test_mps_catalog_runtime/malformed.mps";
+    remove(valid_path);
+    remove(bad_path);
+    test_remove_directory(directory);
+    EXPECT(test_make_directory(directory) &&
+               write_test_mps(valid_path, 2, 1, 0) &&
+               write_test_mps(bad_path, 2, 1, 1),
+           "write valid and malformed MPS catalog fixtures");
+
+    struct mps_catalog catalog;
+    mps_catalog_init(&catalog, directory);
+    EXPECT(catalog.count == 1 && strcmp(catalog.entries[0].name, "valid") == 0 &&
+               catalog.entries[0].tile_width == 2 &&
+               catalog.entries[0].tile_height == 1,
+           "catalog keeps valid MPS files and ignores malformed headers");
+
+    struct mps_source_engine engine;
+    mps_source_engine_init(&engine);
+    struct mps_source *source = (struct mps_source *)(uintptr_t)1;
+    EXPECT(mps_source_start(&engine, 42, valid_path, "valid", 1, 1,
+                            &source) == MPS_SOURCE_ERR_DIMENSION &&
+               source == nullptr,
+           "source rejects exact-dimension mismatch and clears output");
+    EXPECT(mps_source_start(&engine, 42, valid_path, "valid", 2, 1,
+                            &source) == MPS_SOURCE_OK && source != nullptr &&
+               source->initial_cursor == 0 && source->tile_cache == nullptr,
+           "source starts with lazy cache and zero initial cursor");
+    uint64_t first_attachment = source->attachment_id;
+    struct presenter_stream_tile tile = {0};
+    EXPECT(mps_source_read(source, 0, &tile) == MPS_SOURCE_OK &&
+               tile.pixels[0] == 1 && source->tile_read_count == 1,
+           "source lazily reads the first tile");
+    EXPECT(mps_source_read(source, 0, &tile) == MPS_SOURCE_OK &&
+               tile.pixels[0] == 1 && source->tile_read_count == 1,
+           "repeated tile read uses the one-tile cache");
+    EXPECT(mps_source_read(source, 1, &tile) == MPS_SOURCE_OK &&
+               tile.pixels[0] == 2 && source->tile_read_count == 2,
+           "different tile invalidates cache and reads once");
+
+    struct mps_source *replacement = nullptr;
+    EXPECT(mps_source_start(&engine, 42, valid_path, "replacement", 2, 1,
+                            &replacement) == MPS_SOURCE_OK &&
+               replacement != nullptr &&
+               replacement->attachment_id != first_attachment &&
+               replacement->tile_cache == nullptr,
+           "replacement closes old source and changes attachment identity");
+    mps_source_release(&engine, 42);
+    EXPECT(mps_source_find(&engine, 42) == nullptr,
+           "source release removes runtime state and cache");
+    mps_source_engine_shutdown(&engine);
+    EXPECT(mps_source_find(&engine, 42) == nullptr,
+           "source shutdown leaves no active runtime source");
+    remove(valid_path);
+    remove(bad_path);
+    test_remove_directory(directory);
     return 1;
 }
 
@@ -2393,11 +3364,11 @@ static int test_public_viewer_eligibility(void)
            "1x1 screen center uses block-cell geometric center");
 
     struct mpv_public_snapshot below = public_snapshot(
-        center.x + 15.5, center.y, center.z, "minecraft:overworld");
+        16.5, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot exact = public_snapshot(
-        center.x + 16.0, center.y, center.z, "minecraft:overworld");
+        17.0, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot above = public_snapshot(
-        center.x + 16.01, center.y, center.z, "minecraft:overworld");
+        17.01, center.y, center.z, "minecraft:overworld");
     struct mpv_public_snapshot other = public_snapshot(
         center.x, center.y, center.z, "minecraft:nether");
     struct mpv_public_snapshot invalid = below;
@@ -2415,6 +3386,22 @@ static int test_public_viewer_eligibility(void)
            "invalid snapshot is excluded");
     EXPECT(!mpv_public_viewer_eligible(false, &below, &geometry),
            "offline player is excluded");
+
+    struct screen_geom huge;
+    EXPECT(screen_geom_validate(
+               (struct screen_pos){0, 1023, 0},
+               (struct screen_pos){1023, 0, 0},
+               "minecraft:overworld", "minecraft:overworld",
+               SCREEN_FACE_SOUTH, &huge) == SCREEN_GEOM_OK,
+           "construct huge public screen geometry");
+    struct mpv_public_snapshot huge_near = public_snapshot(
+        1023.5, 0.5, 16.0, "minecraft:overworld");
+    struct mpv_public_snapshot huge_far = public_snapshot(
+        -32.0, 0.5, 16.0, "minecraft:overworld");
+    EXPECT(mpv_public_viewer_eligible(true, &huge_near, &huge),
+           "near edge of a huge screen remains eligible");
+    EXPECT(!mpv_public_viewer_eligible(true, &huge_far, &huge),
+           "far outside a huge screen is excluded");
     return 1;
 }
 
@@ -2478,9 +3465,9 @@ static int test_public_viewer_collection_and_membership(void)
     return 1;
 }
 
-/* ================================================================
- * MAP COLOR TESTS (ABGR format verification)
- * ================================================================ */
+// ================================================================
+// MAP COLOR TESTS (ABGR format verification)
+// ================================================================
 
 static int test_map_test_patterns(void)
 {
@@ -2766,14 +3753,14 @@ static int test_msvc_shared_ptr_release_contract(void)
     return 1;
 }
 
-/* ----------------------------------------------------------------
- * Stateful fake write-world.  Backs both the renderer lifetime test (which
- * needs a resolvable fake Player for the pure-C map creation path) and the
- * Pure-C World Write ABI tests below.  Every object mimics the measured
- * MSVC layouts: hidden return buffers, scalar deleting destructors with
- * flag 1, consumed 16-byte optional<ItemStack> parameters and the fake
- * BlockStates list shape.
- * ---------------------------------------------------------------- */
+// ----------------------------------------------------------------
+// Stateful fake write-world.  Backs both the renderer lifetime test (which
+// needs a resolvable fake Player for the pure-C map creation path) and the
+// Pure-C World Write ABI tests below.  Every object mimics the measured
+// MSVC layouts: hidden return buffers, scalar deleting destructors with
+// flag 1, consumed 16-byte optional<ItemStack> parameters and the fake
+// BlockStates list shape.
+// ----------------------------------------------------------------
 
 #define FAKE_WW_INV_SIZE 6
 #define FAKE_WW_CELLS 4
@@ -2788,7 +3775,7 @@ struct fake_ww_cell {
     char type[48];
 };
 
-struct fake_ww_world { /* serves as the Endstone Dimension object */
+struct fake_ww_world { // serves as the Endstone Dimension object
     void **vtable;
     struct fake_ww_cell cells[FAKE_WW_CELLS];
     int cell_count;
@@ -2800,7 +3787,7 @@ struct fake_ww_world { /* serves as the Endstone Dimension object */
 
 struct fake_ww_block {
     void **vtable;
-    struct fake_ww_world *world; /* +8: read as the block_source diagnostic */
+    struct fake_ww_world *world; // +8: read as the block_source diagnostic
     struct fake_ww_cell *cell;
 };
 
@@ -2830,7 +3817,7 @@ struct fake_ww_inventory {
     int64_t map_id[FAKE_WW_INV_SIZE];
     int clear_calls;
     int last_cleared;
-    int drop_set_item_at; /* slot whose setItem silently fails, or -1 */
+    int drop_set_item_at; // slot whose setItem silently fails, or -1
 };
 
 struct fake_ww_player {
@@ -2992,7 +3979,7 @@ static void *fake_ww_create_block_data_states(void *self, void **out,
                    !states->vec_end && states->mask == 7 &&
                    states->maxidx == 8 && node && node != sentinel;
     if (node) {
-        /* The 16-char key must be a real heap string: _Mysize 16, _Myres 31. */
+        // The 16-char key must be a real heap string: _Mysize 16, _Myres 31.
         shape_ok = shape_ok && node->next == sentinel &&
                    node->prev == sentinel && sentinel->prev == node &&
                    node->variant_index == ES_BLOCK_STATE_WHICH_INT &&
@@ -3000,12 +3987,12 @@ static void *fake_ww_create_block_data_states(void *self, void **out,
                    *(size_t *)(node->key + 16) == 16 &&
                    *(size_t *)(node->key + 24) == 31;
         g_ww_states_facing = *(int32_t *)node->variant_storage;
-        /* Emulate the callee-destroys contract with the shared heap. */
+        // Emulate the callee-destroys contract with the shared heap.
         cpp_string_destroy(node->key);
         free(node);
     }
     free(sentinel);
-    cpp_string_destroy(type_string); /* SSO type id: no-op */
+    cpp_string_destroy(type_string); // SSO type id: no-op
     g_ww_states_shape_ok = shape_ok;
     *out = fake_ww_new_block_data(g_ww_states_type, g_ww_states_facing);
     return out;
@@ -3108,8 +4095,8 @@ static void fake_ww_meta_set_display_name(void *self, void *optional_ptr)
     if (!parameter->has_value) return;
     snprintf(g_ww_last_display_name, sizeof(g_ww_last_display_name), "%s",
              cpp_string_str(parameter->value));
-    /* Emulate callee destruction of the by-value optional; for a >15 char
-     * name this frees the caller's heap buffer through the shared heap. */
+    // Emulate callee destruction of the by-value optional; for a >15 char
+    // name this frees the caller's heap buffer through the shared heap.
     cpp_string_destroy(parameter->value);
     parameter->has_value = 0;
 }
@@ -3142,10 +4129,10 @@ static void fake_ww_meta_set_map_view(void *self, const void *map_view)
     struct fake_ww_item_meta *meta = self;
     meta->map_view = (void *)map_view;
     if (map_view) {
-        /* The measured setMapView reads MapView slot 1 getId internally. */
-        typedef int64_t (*get_id_fn)(void *);
-        meta->map_id = ((get_id_fn)(*(void ***)map_view)
-                            [ES_MAPVIEW_SLOT_GET_ID])((void *)map_view);
+        // The measured setMapView reads MapView slot 1 getId internally.
+        meta->map_id = ((int64_t (*)(void *))(
+                            (*(void ***)map_view)[ES_MAPVIEW_SLOT_GET_ID]))(
+                            (void *)map_view);
         meta->has_map_id = 1;
     }
 }
@@ -3161,8 +4148,8 @@ static void *fake_ww_inv_get_item(void *self, void *out_ptr, int slot)
     struct fake_ww_inventory *inventory = self;
     struct es_optional_item_stack *out = out_ptr;
     if (slot < 0 || slot >= FAKE_WW_INV_SIZE || !inventory->occupied[slot]) {
-        /* The impl field is GARBAGE when the optional is empty; production
-         * code crashes this test if it ever dereferences it. */
+        // The impl field is GARBAGE when the optional is empty; production
+        // code crashes this test if it ever dereferences it.
         out->impl = (void *)(uintptr_t)0xDEADDEAD;
         out->has_value = 0;
         return out;
@@ -3187,8 +4174,8 @@ static void fake_ww_inv_set_item(void *self, int slot, void *param_ptr)
         inventory->occupied[slot] = 1;
         inventory->map_id[slot] = impl->has_map_id ? impl->map_id : -1;
     }
-    /* The callee consumes the by-value optional: the impl is moved into the
-     * inventory and the caller's field is nulled. */
+    // The callee consumes the by-value optional: the impl is moved into the
+    // inventory and the caller's field is nulled.
     fake_ww_impl_delete(impl, 1);
     parameter->impl = nullptr;
     parameter->has_value = 0;
@@ -3334,6 +4321,22 @@ static void setup_fake_write_world(struct fake_ww_server *server,
     map_view->vtable = g_ww_map_view_vtable;
 }
 
+static struct presenter_viewer test_presenter_viewer(
+    void *player, uint64_t stable_id, double x, double y, double z,
+    const char *dimension)
+{
+    struct presenter_viewer viewer = {
+        .player = player,
+        .context = nullptr,
+        .stable_id = stable_id,
+        .x = x,
+        .y = y,
+        .z = z,
+    };
+    snprintf(viewer.dimension, sizeof(viewer.dimension), "%s", dimension);
+    return viewer;
+}
+
 static int test_renderer_registration_callback_and_lifetime(void)
 {
     void *server_vtable[ES_SERVER_SLOT_CREATE_MAP + 1] = {0};
@@ -3361,9 +4364,9 @@ static int test_renderer_registration_callback_and_lifetime(void)
     g_fake_get_map_calls = 0;
     g_fake_get_map_requested_id = 0;
 
-    /* The pure-C map creation path resolves the creator's world through the
-     * measured Player/Dimension slots, so a resolvable fake player is
-     * required (the old C++ bridge test used an opaque dummy pointer). */
+    // The pure-C map creation path resolves the creator's world through the
+    // measured Player/Dimension slots, so a resolvable fake player is
+    // required (the old C++ bridge test used an opaque dummy pointer).
     struct fake_ww_server ww_server;
     struct fake_ww_player creator;
     struct fake_ww_world ww_world;
@@ -3374,24 +4377,29 @@ static int test_renderer_registration_callback_and_lifetime(void)
 
     struct map_render_ctx context;
     map_render_init(&context, &server, nullptr);
-    struct screen_entry screen = {0};
-    strcpy(screen.name, "lifecycle");
+    struct screen_registry registry;
+    screen_registry_init(&registry);
+    struct screen_geom geometry;
     struct screen_pos position = {0, 64, 0};
     EXPECT(screen_geom_validate(position, position, "minecraft:overworld",
                                 "minecraft:overworld", SCREEN_FACE_SOUTH,
-                                &screen.geom) == SCREEN_GEOM_OK,
+                                &geometry) == SCREEN_GEOM_OK,
            "construct 1x1 renderer test screen");
-    EXPECT(map_render_init_screen(&context, &screen, &creator) ==
-               MAP_RENDER_OK,
+    int screen_index = -1;
+    EXPECT(screen_registry_create(&registry, "lifecycle", "owner",
+                                  &geometry, &screen_index) == SCREEN_OK,
+           "create renderer test screen with a Surface");
+    struct screen_entry *screen = registry.screens[screen_index];
+    EXPECT(map_render_init_screen(&context, screen, &creator) == MAP_RENDER_OK,
            "register renderer through measured shared_ptr ABI");
     EXPECT(g_fake_create_map_calls == 1 && g_fake_get_map_calls == 0,
            "new screen allocates its map once");
-    EXPECT(screen.tiles_initialized && screen.tiles[0].map_id == 777,
+    EXPECT(screen->tiles_initialized && screen->tiles[0].map_id == 777,
            "MapView registration records map id");
     EXPECT(g_fake_map_locked, "MapView is locked");
 
     struct map_renderer_stats stats;
-    EXPECT(map_render_get_stats(&screen, 0, &stats),
+    EXPECT(map_render_get_stats(screen, 0, &stats),
            "renderer statistics are available");
     EXPECT(stats.initialize_count == 1,
            "addRenderer executes initialize callback exactly once");
@@ -3400,14 +4408,14 @@ static int test_renderer_registration_callback_and_lifetime(void)
 
     void *players[] = { &player, &second_player };
     const char *player_ids[] = { "diagnostic-a", "diagnostic-b" };
-    EXPECT(map_render_set_test_pattern(&context, &screen, MAP_TEST_RED,
+    EXPECT(map_render_set_test_pattern(&context, screen, MAP_TEST_RED,
                                        players, player_ids, 2) == 0,
            "send fixed diagnostic pattern to supplied public viewers");
     EXPECT(g_fake_render_send_count == 2,
            "map layer sends to all supplied viewers without UUID filtering");
     EXPECT(g_fake_rendered_pixel == UINT32_C(0xff0000ff),
            "renderer callback writes red into measured canvas buffer");
-    EXPECT(map_render_get_stats(&screen, 0, &stats) &&
+    EXPECT(map_render_get_stats(screen, 0, &stats) &&
                 stats.render_count == 2 && stats.last_player == &second_player,
            "renderer callback diagnostics record both supplied players");
     EXPECT(stats.last_canvas_valid && stats.last_canvas_pixels ==
@@ -3417,75 +4425,101 @@ static int test_renderer_registration_callback_and_lifetime(void)
                stats.last_first_pixel == UINT32_C(0xff0000ff) &&
                stats.last_last_pixel == UINT32_C(0xff0000ff),
            "renderer diagnostics verify the fixed-pattern canvas write");
-    EXPECT(map_render_resend(&context, &screen, players, player_ids, 2) == 0 &&
-               g_fake_render_send_count == 4,
-           "debug resend boundary sends to supplied public viewers");
-
-    /* Unchanged tiles must not be retransmitted: sendMap dominates the
-     * server tick, and video frames repeat large areas. */
+    struct presenter_viewer viewers[] = {
+        test_presenter_viewer(&player, 1, 0.5, 64.5, 2.0,
+                              "minecraft:overworld"),
+        test_presenter_viewer(&second_player, 2, 0.5, 64.5, 3.0,
+                              "minecraft:overworld"),
+    };
+    struct presenter_stats presenter_stats;
     size_t frame_bytes = (size_t)SCREEN_TILE_SIZE * SCREEN_TILE_SIZE * 4;
     uint8_t *frame = malloc(frame_bytes);
     EXPECT(frame != nullptr, "allocate change-detection frame");
-    memset(frame, 0x11, frame_bytes);
-
+    memset(frame, 0x33, frame_bytes);
+    EXPECT(map_render_submit_frame(screen, frame, frame_bytes,
+                                   SURFACE_FORMAT_ABGR8888) == MAP_RENDER_OK,
+           "submit producer frame into the Surface");
+    memset(frame, 0x44, frame_bytes);
     int before = g_fake_render_send_count;
-    map_render_send_frame(&context, &screen, frame, players, player_ids, 2);
-    EXPECT(g_fake_render_send_count == before + 2,
-           "first frame after a pattern is sent to every viewer");
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 1 && presenter_stats.sent == 1 &&
+               g_fake_render_send_count == before + 2 &&
+               g_fake_rendered_pixel == UINT32_C(0x33333333),
+           "present copies exactly one Surface tile to both viewers");
 
+    memset(frame, 0x33, frame_bytes);
+    EXPECT(map_render_submit_frame(screen, frame, frame_bytes,
+                                   SURFACE_FORMAT_ABGR8888) == MAP_RENDER_OK,
+           "submit unchanged full frame");
     before = g_fake_render_send_count;
-    map_render_send_frame(&context, &screen, frame, players, player_ids, 2);
-    EXPECT(g_fake_render_send_count == before,
-           "an identical frame is not retransmitted");
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 0 && presenter_stats.sent == 0 &&
+               g_fake_render_send_count == before,
+           "unchanged full frame creates no dirty work or transmissions");
 
-    frame[frame_bytes - 4] = 0x22; /* last pixel only */
+    frame[frame_bytes - 4] = 0x55; // Last pixel only.
+    EXPECT(map_render_submit_frame(screen, frame, frame_bytes,
+                                   SURFACE_FORMAT_ABGR8888) == MAP_RENDER_OK,
+           "submit one-pixel change");
     before = g_fake_render_send_count;
-    map_render_send_frame(&context, &screen, frame, players, player_ids, 2);
-    EXPECT(g_fake_render_send_count == before + 2,
-           "a single changed pixel makes the tile dirty again");
-
-    before = g_fake_render_send_count;
-    map_render_send_frame(&context, &screen, frame, players, player_ids, 2);
-    EXPECT(g_fake_render_send_count == before,
-           "the refreshed copy suppresses the next identical frame");
-
-    /* A newly eligible viewer has no client-side state, so a resend must
-     * transmit every tile even though nothing changed. */
-    before = g_fake_render_send_count;
-    EXPECT(map_render_resend(&context, &screen, players, player_ids, 2) == 0 &&
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 1 && presenter_stats.sent == 1 &&
                g_fake_render_send_count == before + 2,
-           "resend ignores change tracking for new viewers");
+           "one-pixel change sends only the affected tile to both viewers");
 
-    /* Stopping playback leaves the client showing unknown content. */
-    map_render_clear(&context, &screen);
+    struct presenter_resident_cursor cursor = {0};
+    bool done = false;
     before = g_fake_render_send_count;
-    map_render_send_frame(&context, &screen, frame, players, player_ids, 2);
-    EXPECT(g_fake_render_send_count == before + 2,
-           "clearing invalidates the tracked copy");
+    EXPECT(map_render_resend(&context, screen, &viewers[0], &cursor, 1,
+                             &done, &presenter_stats) == 0 &&
+               presenter_stats.examined == 1 && presenter_stats.sent == 1 &&
+               done && cursor.index == 1 &&
+               g_fake_render_send_count == before + 1,
+           "forced resend uses one viewer and resident cursor");
+
+    map_render_clear(&context, screen);
+    struct surface_stats surface_stats;
+    EXPECT(surface_get_stats(screen->surface, &surface_stats) == SURFACE_OK &&
+               surface_stats.generation == 0 &&
+               surface_stats.resident_tiles == 0 &&
+               surface_stats.pending_tiles == 0 &&
+               surface_stats.allocated_pixel_bytes == 0,
+           "clear resets Surface residents without retained tile history");
+    memset(frame, 0x33, frame_bytes);
+    EXPECT(map_render_submit_frame(screen, frame, frame_bytes,
+                                   SURFACE_FORMAT_ABGR8888) == MAP_RENDER_OK,
+           "submit frame after clear");
+    before = g_fake_render_send_count;
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.sent == 1 &&
+               g_fake_render_send_count == before + 2,
+           "clear invalidates content so the next frame is sent");
     free(frame);
 
-    map_render_destroy_screen(&context, &screen);
-    EXPECT(screen.tiles[0].last_sent == nullptr &&
-               !screen.tiles[0].last_sent_valid,
-           "destroy releases the change-detection copy");
-    EXPECT(!screen.tiles_initialized && screen.tiles[0].renderer == nullptr,
+    map_render_destroy_screen(&context, screen);
+    EXPECT(!screen->tiles_initialized && screen->tiles[0].renderer == nullptr,
            "screen destruction removes renderer and releases final owner");
-    EXPECT(screen.tiles[0].map_id_valid && screen.tiles[0].map_id == 777,
+    EXPECT(screen->tiles[0].map_id_valid && screen->tiles[0].map_id == 777,
            "runtime destruction preserves persistent screen map identity");
-    EXPECT(map_render_init_screen(&context, &screen, &creator) ==
+    EXPECT(map_render_init_screen(&context, screen, &creator) ==
                MAP_RENDER_OK,
            "restart resolves the persistent MapView");
     EXPECT(g_fake_create_map_calls == 1 && g_fake_get_map_calls == 1 &&
                g_fake_get_map_requested_id == 777,
            "restart reuses stored map id instead of allocating a new map");
-    map_render_destroy_screen(&context, &screen);
+    map_render_destroy_screen(&context, screen);
+    screen_registry_cleanup(&registry);
     return 1;
 }
 
-/* ----------------------------------------------------------------
- * Multi-map fakes: one fake MapView per tile, so per-tile send counts
- * and rendered windows are observable on a multi-tile screen.
- * ---------------------------------------------------------------- */
+// ----------------------------------------------------------------
+// Multi-map fakes: one fake MapView per tile, so per-tile send counts
+// and rendered windows are observable on a multi-tile screen.
+// ----------------------------------------------------------------
 
 #define FAKE_MULTI_MAPS (SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT)
 
@@ -3613,98 +4647,171 @@ static int test_render_multi_tile_dirty_tracking(void)
 
     struct map_render_ctx context;
     map_render_init(&context, &server, nullptr);
-    struct screen_entry screen = {0};
-    strcpy(screen.name, "grid");
+    struct screen_registry registry;
+    screen_registry_init(&registry);
+    struct screen_geom geometry;
     EXPECT(screen_geom_validate((struct screen_pos){0, 65, 0},
                                 (struct screen_pos){2, 64, 0},
                                 "minecraft:overworld", "minecraft:overworld",
                                 SCREEN_FACE_SOUTH,
-                                &screen.geom) == SCREEN_GEOM_OK,
+                                &geometry) == SCREEN_GEOM_OK,
            "construct 3x2 renderer test screen");
-    EXPECT(map_render_init_screen(&context, &screen, &creator) ==
+    int screen_index = -1;
+    EXPECT(screen_registry_create(&registry, "grid", "owner", &geometry,
+                                  &screen_index) == SCREEN_OK,
+           "create 3x2 renderer test screen with a Surface");
+    struct screen_entry *screen = registry.screens[screen_index];
+    EXPECT(map_render_init_screen(&context, screen, &creator) ==
                MAP_RENDER_OK,
            "register a renderer per tile");
-    const int tile_count = screen_geom_tile_count(&screen.geom);
+    const int tile_count = screen_geom_tile_count(&screen->geom);
     EXPECT(tile_count == 6 && g_multi_map_count == 6,
            "3x2 screen allocates six distinct maps");
     for (int i = 0; i < tile_count; i++) {
-        EXPECT(screen.tiles[i].map_view == &g_multi_maps[i] &&
-                   screen.tiles[i].map_id == g_multi_maps[i].id,
+        EXPECT(screen->tiles[i].map_view == &g_multi_maps[i] &&
+                   screen->tiles[i].map_id == g_multi_maps[i].id,
                "tiles keep their own map identity");
     }
 
-    int pixel_width = screen_geom_pixel_width(&screen.geom);
-    int pixel_height = screen_geom_pixel_height(&screen.geom);
-    uint32_t *frame = malloc((size_t)pixel_width * pixel_height * 4);
+    int pixel_width = screen_geom_pixel_width(&screen->geom);
+    int pixel_height = screen_geom_pixel_height(&screen->geom);
+    size_t frame_bytes = (size_t)pixel_width * pixel_height * 4;
+    uint32_t *frame = malloc(frame_bytes);
     EXPECT(frame != nullptr, "allocate 3x2 frame");
     for (int i = 0; i < tile_count; i++) {
         fill_tile_window(frame, pixel_width, i % 3, i / 3,
                          UINT32_C(0xff000000) | (uint32_t)(i + 1));
     }
 
-    const int viewers = 2;
-    void *players[] = { &viewer_a, &viewer_b };
-    const char *ids[] = { "a", "b" };
-    map_render_send_frame(&context, &screen, (const uint8_t *)frame,
-                          players, ids, viewers);
-    EXPECT(g_multi_send_total == viewers * tile_count,
-           "the first frame reaches every viewer for every tile");
-    uint8_t *stored[6] = {0};
+    struct presenter_viewer viewers[] = {
+        test_presenter_viewer(&viewer_a, 1, 1.5, 65.5, 2.0,
+                              "minecraft:overworld"),
+        test_presenter_viewer(&viewer_b, 2, 1.5, 65.5, 3.0,
+                              "minecraft:overworld"),
+    };
+    struct presenter_stats presenter_stats;
+    EXPECT(map_render_submit_frame(screen, (const uint8_t *)frame,
+                                   frame_bytes, SURFACE_FORMAT_ABGR8888) ==
+               MAP_RENDER_OK,
+           "submit initial multi-tile frame");
+    EXPECT(map_render_present(&context, screen, viewers, 2, 2,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 2 && presenter_stats.sent == 2,
+           "presenter budget carries dirty tiles to the next call");
+    struct surface_stats surface_stats;
+    EXPECT(surface_get_stats(screen->surface, &surface_stats) == SURFACE_OK &&
+               surface_stats.pending_tiles == 4,
+           "four dirty tiles remain after the first budget");
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 4 && presenter_stats.sent == 4 &&
+               g_multi_send_total == 2 * tile_count,
+           "carryover drains and both eligible viewers receive each tile");
     for (int i = 0; i < tile_count; i++) {
-        EXPECT(g_multi_maps[i].send_count == viewers,
+        EXPECT(g_multi_maps[i].send_count == 2,
                "each map is sent exactly once per viewer");
         EXPECT(g_multi_maps[i].first_pixel ==
                    (UINT32_C(0xff000000) | (uint32_t)(i + 1)),
                "each renderer extracts its own tile window");
-        stored[i] = screen.tiles[i].last_sent;
-        EXPECT(stored[i] != nullptr &&
-                   ((uint32_t *)stored[i])[0] ==
+        struct surface_tile_view tile = {0};
+        EXPECT(surface_read_tile(screen->surface, (uint32_t)(i % 3),
+                                 (uint32_t)(i / 3), &tile) == SURFACE_OK &&
+                   ((const uint32_t *)tile.pixels)[0] ==
                        (UINT32_C(0xff000000) | (uint32_t)(i + 1)),
-               "each stored copy holds its own tile window");
+               "Surface stores each extracted tile window");
     }
 
-    /* Change exactly one tile: (col 2, row 0) = index 2. */
+    // Change exactly one tile: (col 2, row 0) = index 2.
     fill_tile_window(frame, pixel_width, 2, 0, UINT32_C(0xff123456));
+    EXPECT(map_render_submit_frame(screen, (const uint8_t *)frame,
+                                   frame_bytes, SURFACE_FORMAT_ABGR8888) ==
+               MAP_RENDER_OK,
+           "submit one-tile change");
     int before = g_multi_send_total;
-    map_render_send_frame(&context, &screen, (const uint8_t *)frame,
-                          players, ids, viewers);
-    EXPECT(g_multi_send_total == before + viewers,
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 1 && presenter_stats.sent == 1 &&
+               g_multi_send_total == before + 2,
            "a one-tile change sends viewers x 1 maps, not viewers x tiles");
-    EXPECT(g_multi_maps[2].send_count == 2 * viewers &&
+    EXPECT(g_multi_maps[2].send_count == 4 &&
                g_multi_maps[2].first_pixel == UINT32_C(0xff123456),
            "only the changed tile is retransmitted, with its new window");
-    EXPECT(((uint32_t *)screen.tiles[2].last_sent)[0] == UINT32_C(0xff123456),
-           "the changed tile's stored copy is refreshed");
+    struct surface_tile_view changed_tile = {0};
+    EXPECT(surface_read_tile(screen->surface, 2, 0, &changed_tile) ==
+               SURFACE_OK &&
+               ((const uint32_t *)changed_tile.pixels)[0] ==
+                   UINT32_C(0xff123456),
+           "the changed Surface tile is refreshed");
     for (int i = 0; i < tile_count; i++) {
         if (i == 2) continue;
-        EXPECT(g_multi_maps[i].send_count == viewers,
+        EXPECT(g_multi_maps[i].send_count == 2,
                "untouched tiles are not resent");
-        EXPECT(screen.tiles[i].last_sent == stored[i] &&
-                   ((uint32_t *)stored[i])[0] ==
+        struct surface_tile_view tile = {0};
+        EXPECT(surface_read_tile(screen->surface, (uint32_t)(i % 3),
+                                 (uint32_t)(i / 3), &tile) == SURFACE_OK &&
+                   ((const uint32_t *)tile.pixels)[0] ==
                        (UINT32_C(0xff000000) | (uint32_t)(i + 1)),
-               "untouched stored copies are not rewritten");
+               "untouched Surface tiles remain unchanged");
     }
 
+    EXPECT(map_render_submit_frame(screen, (const uint8_t *)frame,
+                                   frame_bytes, SURFACE_FORMAT_ABGR8888) ==
+               MAP_RENDER_OK,
+           "submit identical multi-tile frame");
     before = g_multi_send_total;
-    map_render_send_frame(&context, &screen, (const uint8_t *)frame,
-                          players, ids, viewers);
-    EXPECT(g_multi_send_total == before, "an identical frame sends nothing");
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.examined == 0 && presenter_stats.sent == 0 &&
+               g_multi_send_total == before,
+           "an identical full frame sends nothing");
 
-    /* The mirrored tile (col 0, row 1) = index 3 must be the one dirtied:
-     * a tile_col/tile_row transposition would dirty (col 1, row 0) instead. */
+    // The mirrored tile (col 0, row 1) = index 3 must be the one dirtied:
+    // a tile_col/tile_row transposition would dirty (col 1, row 0) instead.
     fill_tile_window(frame, pixel_width, 0, 1, UINT32_C(0xff654321));
+    EXPECT(map_render_submit_frame(screen, (const uint8_t *)frame,
+                                   frame_bytes, SURFACE_FORMAT_ABGR8888) ==
+               MAP_RENDER_OK,
+           "submit mirrored tile change");
     before = g_multi_send_total;
-    map_render_send_frame(&context, &screen, (const uint8_t *)frame,
-                          players, ids, viewers);
-    EXPECT(g_multi_send_total == before + viewers &&
-               g_multi_maps[3].send_count == 2 * viewers &&
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               g_multi_send_total == before + 2 &&
+               g_multi_maps[3].send_count == 4 &&
                g_multi_maps[3].first_pixel == UINT32_C(0xff654321),
            "row-major tile addressing dirties the correct tile");
-    EXPECT(g_multi_maps[1].send_count == viewers,
+    EXPECT(g_multi_maps[1].send_count == 2,
            "the transposed tile stays clean");
 
+    map_render_clear(&context, screen);
+    EXPECT(surface_get_stats(screen->surface, &surface_stats) == SURFACE_OK &&
+               surface_stats.generation == 0 && surface_stats.resident_tiles == 0 &&
+               surface_stats.pending_tiles == 0 &&
+               surface_stats.allocated_pixel_bytes == 0,
+           "clear resets multi-tile Surface history");
+    memset(frame, 0, frame_bytes);
+    fill_tile_window(frame, pixel_width, 2, 1, UINT32_C(0xffabcdef));
+    EXPECT(map_render_submit_frame(screen, (const uint8_t *)frame,
+                                   frame_bytes, SURFACE_FORMAT_ABGR8888) ==
+               MAP_RENDER_OK,
+           "submit sparse resident frame");
+    before = g_multi_send_total;
+    EXPECT(map_render_present(&context, screen, viewers, 2, 8,
+                              &presenter_stats) == MAP_RENDER_OK &&
+               presenter_stats.sent == 1 && g_multi_send_total == before + 2,
+           "sparse frame presents its one resident tile");
+    struct presenter_resident_cursor cursor = {0};
+    bool done = false;
+    before = g_multi_send_total;
+    EXPECT(map_render_resend(&context, screen, &viewers[0], &cursor, 1,
+                             &done, &presenter_stats) == 0 && done &&
+               cursor.index == 1 && presenter_stats.examined == 1 &&
+               presenter_stats.sent == 1 && g_multi_send_total == before + 1 &&
+               g_multi_maps[5].first_pixel == UINT32_C(0xffabcdef),
+           "forced resend walks sparse residents by cursor");
+
     free(frame);
-    map_render_destroy_screen(&context, &screen);
+    map_render_destroy_screen(&context, screen);
+    screen_registry_cleanup(&registry);
     return 1;
 }
 
@@ -4009,9 +5116,9 @@ static int test_world_read_abi_validation_inspection_and_map_lookup(void)
     return 1;
 }
 
-/* ================================================================
- * PURE-C WORLD WRITE ABI TESTS
- * ================================================================ */
+// ================================================================
+// PURE-C WORLD WRITE ABI TESTS
+// ================================================================
 
 static int test_world_write_prepare_builds_frame_and_map_item(void)
 {
@@ -4096,7 +5203,7 @@ static int test_world_write_prepare_failure_paths(void)
     struct screen_pos cell = {0, 64, 0};
     struct screen_pos backing = {0, 64, 1};
 
-    /* Non-map meta: the getType()==3 downcast must reject and free all. */
+    // Non-map meta: the getType()==3 downcast must reject and free all.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_meta_type = 0;
     detail[0] = '\0';
@@ -4111,7 +5218,7 @@ static int test_world_write_prepare_failure_paths(void)
                g_ww_block_data_live == 0 && g_ww_bad_delete_flags == 0,
            "downcast failure frees impl, meta and BlockData exactly once");
 
-    /* Map id mismatch between the MapView and the requested id. */
+    // Map id mismatch between the MapView and the requested id.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_map_view_id = 777;
     EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
@@ -4123,7 +5230,7 @@ static int test_world_write_prepare_failure_paths(void)
                g_ww_block_data_live == 0,
            "map id mismatch leaks nothing");
 
-    /* setItemMeta returning false is also a mismatch, as in C++. */
+    // setItemMeta returning false is also a mismatch, as in C++.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_map_view_id = 55;
     g_ww_set_item_meta_result = 0;
@@ -4133,7 +5240,7 @@ static int test_world_write_prepare_failure_paths(void)
                                  nullptr, 0) == MP_WORLD_MAP_ID_MISMATCH,
            "rejected setItemMeta reports a map id mismatch");
 
-    /* Missing ItemType registry. */
+    // Missing ItemType registry.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_registry_missing = 1;
     detail[0] = '\0';
@@ -4147,7 +5254,7 @@ static int test_world_write_prepare_failure_paths(void)
                g_ww_block_data_live == 0,
            "registry failure reports its detail and frees the frame data");
 
-    /* Occupied cell: validation runs before any block data creation. */
+    // Occupied cell: validation runs before any block data creation.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     snprintf(world.cells[0].type, sizeof(world.cells[0].type),
              "minecraft:oak_planks");
@@ -4161,7 +5268,7 @@ static int test_world_write_prepare_failure_paths(void)
                strcmp(detail, "screen cell is not air") == 0,
            "validation precedes createBlockData exactly like the C++ order");
 
-    /* Fluid backing. */
+    // Fluid backing.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     snprintf(world.cells[1].type, sizeof(world.cells[1].type),
              "minecraft:water");
@@ -4175,7 +5282,7 @@ static int test_world_write_prepare_failure_paths(void)
     EXPECT(strncmp(detail, "backing type=minecraft:water", 28) == 0,
            "backing rejection reports the offending type");
 
-    /* Wrong dimension fails closed before touching the world. */
+    // Wrong dimension fails closed before touching the world.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     detail[0] = '\0';
     EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:the_nether",
@@ -4279,13 +5386,13 @@ static int test_world_write_place_and_remove(void)
                strcmp(world.cells[0].type, "minecraft:air") == 0,
            "removal builds air block data through the states-free overload");
 
-    /* Removal of an already-air cell is a no-op success. */
+    // Removal of an already-air cell is a no-op success.
     EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
                                    cell, 9, nullptr, 0) == MP_WORLD_OK &&
                g_ww_create_air_calls == 1,
            "air cell removal succeeds without creating block data");
 
-    /* Refuse to remove anything that is not a frame. */
+    // Refuse to remove anything that is not a frame.
     detail[0] = '\0';
     EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
                                    backing, 9, detail,
@@ -4299,7 +5406,7 @@ static int test_world_write_place_and_remove(void)
                                    nullptr, 0) == MP_WORLD_BAD_ARGUMENT,
            "missing block is a bad argument");
 
-    /* setData that does not take effect must be detected. */
+    // setData that does not take effect must be detected.
     world.set_data_applies = 0;
     detail[0] = '\0';
     EXPECT(mp_world_place_prepared(prepared, detail, (int)sizeof(detail)) ==
@@ -4308,7 +5415,7 @@ static int test_world_write_place_and_remove(void)
     EXPECT(strcmp(detail, "frame block was not present after setData") == 0,
            "silent failure detail matches the C++ reference text");
 
-    /* rollback_placed is the fire-and-forget removal wrapper. */
+    // rollback_placed is the fire-and-forget removal wrapper.
     world.set_data_applies = 1;
     snprintf(world.cells[0].type, sizeof(world.cells[0].type),
              "minecraft:frame");
@@ -4332,7 +5439,7 @@ static int test_world_write_deliver_retract_and_rollback(void)
     struct fake_ww_map_view map_view;
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
 
-    /* Full prepare -> place -> deliver -> retract ordering. */
+    // Full prepare -> place -> deliver -> retract ordering.
     struct mp_world_prepared_tile *prepared[2] = {0};
     g_ww_map_view_id = 100;
     EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
@@ -4354,7 +5461,7 @@ static int test_world_write_deliver_retract_and_rollback(void)
                mp_world_place_prepared(prepared[1], nullptr, 0) == MP_WORLD_OK,
            "place both tiles");
 
-    inventory.occupied[0] = 1; /* unrelated junk item in the first slot */
+    inventory.occupied[0] = 1; // unrelated junk item in the first slot
     inventory.map_id[0] = -1;
     char detail[192] = {0};
     EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, detail,
@@ -4379,14 +5486,14 @@ static int test_world_write_deliver_retract_and_rollback(void)
     EXPECT(inventory.clear_calls == 2,
            "a second retraction is a no-op after delivered_slot reset");
 
-    /* Re-delivering moved-out tiles must fail without touching slots. */
+    // Re-delivering moved-out tiles must fail without touching slots.
     EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, nullptr, 0) ==
                MP_WORLD_MAP_DELIVERY_FAILED,
            "tiles whose items were already delivered cannot deliver again");
     mp_world_prepared_destroy(prepared[0]);
     mp_world_prepared_destroy(prepared[1]);
 
-    /* Verification failure at the second tile rolls back the first. */
+    // Verification failure at the second tile rolls back the first.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_map_view_id = 200;
     EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
@@ -4404,7 +5511,7 @@ static int test_world_write_deliver_retract_and_rollback(void)
                                  1, 2, 0, 1, &prepared[1],
                                  nullptr, 0) == MP_WORLD_OK,
            "prepare rollback tile 1");
-    inventory.drop_set_item_at = 1; /* tile 1's setItem silently fails */
+    inventory.drop_set_item_at = 1; // tile 1's setItem silently fails
     detail[0] = '\0';
     EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, detail,
                                           (int)sizeof(detail)) ==
@@ -4419,7 +5526,7 @@ static int test_world_write_deliver_retract_and_rollback(void)
     mp_world_prepared_destroy(prepared[0]);
     mp_world_prepared_destroy(prepared[1]);
 
-    /* Capacity shrinking between check and delivery is detected. */
+    // Capacity shrinking between check and delivery is detected.
     setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
     g_ww_map_view_id = 300;
     EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
@@ -4461,9 +5568,9 @@ static int test_world_write_deliver_retract_and_rollback(void)
 }
 #endif
 
-/* ================================================================
- * MAIN
- * ================================================================ */
+// ================================================================
+// MAIN
+// ================================================================
 
 static int check_external_mcv(const char *path)
 {
@@ -4504,9 +5611,9 @@ static int check_external_mcv(const char *path)
     return result == MCV_OK ? 0 : 1;
 }
 
-/* Sequential decode benchmark: mirrors the playback access pattern
- * (every frame in order) so real .mcv files can be validated for
- * throughput without a running server. */
+// Sequential decode benchmark: mirrors the playback access pattern
+// (every frame in order) so real .mcv files can be validated for
+// throughput without a running server.
 static int bench_external_mcv(const char *path)
 {
     struct mcv_file file;
@@ -4596,8 +5703,216 @@ static int bench_external_mcv(const char *path)
     return 0;
 }
 
+static int test_public_provider_lifecycle(void)
+{
+    const mp_api_v1 *inactive = endstone_mediaplayer_get_api(MP_API_V1);
+    EXPECT(inactive != nullptr, "inactive provider table is exported");
+    EXPECT(endstone_mediaplayer_get_api(MP_API_V1 + 1) == nullptr,
+           "unsupported provider version is absent");
+    EXPECT(strcmp(inactive->result_string(MP_ERR_BUSY), "busy") == 0,
+           "result strings are stable while inactive");
+    mp_screen_handle invalid = 99;
+    EXPECT(inactive->screen_find("missing", &invalid) == MP_ERR_UNAVAILABLE,
+           "stateful operations are unavailable while inactive");
+    EXPECT(invalid == MP_INVALID_SCREEN_HANDLE, "failed find clears handle");
+    mp_frame_handle inactive_frame = UINT64_C(99);
+    EXPECT(inactive->frame_begin(MP_INVALID_SCREEN_HANDLE, &inactive_frame) ==
+               MP_ERR_UNAVAILABLE && inactive_frame == MP_INVALID_FRAME_HANDLE,
+           "inactive frame producer clears output handle");
+
+    struct video_ctx *ctx = calloc(1, sizeof(*ctx));
+    EXPECT(ctx != nullptr, "provider test context allocation");
+    screen_registry_init(&ctx->registry);
+    video_engine_init(&ctx->engine);
+    mps_source_engine_init(&ctx->image_engine);
+    screen_audio_engine_init(&ctx->audio);
+    map_render_init(&ctx->render, nullptr, nullptr);
+    ctx->active = 1;
+    mp_api_provider_activate(ctx);
+    const mp_api_v1 *api = endstone_mediaplayer_get_api(MP_API_V1);
+    EXPECT(api->instance_id != 0, "activation publishes an instance id");
+
+    mp_capabilities caps = {.struct_size = sizeof(caps), .flags = 0};
+    EXPECT(api->capabilities_get(&caps) == MP_OK &&
+           caps.max_width_tiles == 1024 && caps.max_pending_tiles == 256,
+           "capabilities report fixed V1 limits");
+    mp_screen_create_info create = {
+        .struct_size = sizeof(create), .flags = 0, .name = "api-test",
+        .width_tiles = 1, .height_tiles = 1, .backend = MP_BACKEND_LOGICAL,
+    };
+    mp_screen_handle screen = MP_INVALID_SCREEN_HANDLE;
+    EXPECT(api->screen_create(&create, &screen) == MP_OK && screen != 0,
+           "logical screen creation returns a handle");
+    mp_screen_handle found = 0;
+    EXPECT(api->screen_find("api-test", &found) == MP_OK && found == screen,
+           "screen find reuses the stable handle");
+    create.name = "api-second";
+    mp_screen_handle second = MP_INVALID_SCREEN_HANDLE;
+    EXPECT(api->screen_create(&create, &second) == MP_OK && second != 0,
+           "second logical screen for list capacity checks");
+    uint32_t count = 0;
+    EXPECT(api->screen_list(nullptr, 0, &count) == MP_OK && count == 2,
+           "screen list supports count query");
+    mp_screen_handle listed[2] = {0, 0};
+    uint32_t short_count = 0;
+    EXPECT(api->screen_list(listed, 1, &short_count) == MP_ERR_BUFFER_TOO_SMALL &&
+           short_count == 2 && listed[0] == screen,
+           "screen list short buffer returns required count and prefix");
+    short_count = 0;
+    EXPECT(api->screen_list(listed, 2, &short_count) == MP_OK &&
+           short_count == 2 && listed[0] == screen && listed[1] == second,
+           "screen list full buffer returns handles");
+    EXPECT(api->screen_delete(second) == MP_OK, "list fixture cleanup");
+
+    snprintf(ctx->save_path, sizeof(ctx->save_path),
+             "provider_persistence_missing_parent/screens.json");
+    create.name = "api-create-fail";
+    mp_screen_handle failed_create = UINT64_C(99);
+    EXPECT(api->screen_create(&create, &failed_create) == MP_ERR_IO &&
+           failed_create == MP_INVALID_SCREEN_HANDLE &&
+           api->screen_find("api-create-fail", &found) == MP_ERR_NOT_FOUND,
+           "failed create rolls back the registry entry and handle");
+    mp_screen_info info = {.struct_size = sizeof(info), .flags = 0};
+    EXPECT(api->screen_rename(screen, "api-rename-fail") == MP_ERR_IO &&
+           api->screen_get_info(screen, &info) == MP_OK &&
+           strcmp(info.name, "api-test") == 0 &&
+           api->screen_find("api-test", &found) == MP_OK && found == screen &&
+           api->screen_find("api-rename-fail", &found) == MP_ERR_NOT_FOUND,
+           "failed rename restores the old name and handle");
+    ctx->save_path[0] = '\0';
+    create.name = "api-delete-fail";
+    mp_screen_handle failed_delete = MP_INVALID_SCREEN_HANDLE;
+    EXPECT(api->screen_create(&create, &failed_delete) == MP_OK,
+           "delete rollback fixture creation");
+    snprintf(ctx->save_path, sizeof(ctx->save_path),
+             "provider_persistence_missing_parent/screens.json");
+    EXPECT(api->screen_delete(failed_delete) == MP_ERR_IO &&
+           api->screen_get_info(failed_delete, &info) == MP_OK &&
+           strcmp(info.name, "api-delete-fail") == 0 &&
+           api->screen_find("api-delete-fail", &found) == MP_OK &&
+           found == failed_delete,
+           "failed delete preserves the live entry and handle");
+    ctx->save_path[0] = '\0';
+    EXPECT(api->screen_delete(failed_delete) == MP_OK,
+           "delete rollback fixture cleanup");
+    EXPECT(api->screen_get_info(screen, &info) == MP_OK &&
+           info.width_tiles == 1 && info.backend == MP_BACKEND_LOGICAL,
+           "screen info reports logical geometry");
+    struct {
+        mp_screen_info info;
+        unsigned char tail[16];
+    } oversized = {.info = {.struct_size = sizeof(oversized), .flags = 0}};
+    memset(oversized.tail, 0xA5, sizeof(oversized.tail));
+    EXPECT(api->screen_get_info(screen, &oversized.info) == MP_OK &&
+           oversized.tail[0] == 0xA5 && oversized.tail[15] == 0xA5,
+           "oversized output accepts V1 prefix and preserves trailing bytes");
+    unsigned char undersized_bytes[sizeof(info)];
+    memset(undersized_bytes, 0xA5, sizeof(undersized_bytes));
+    ((mp_screen_info *)undersized_bytes)->struct_size = sizeof(uint32_t);
+    EXPECT(api->screen_get_info(screen, (mp_screen_info *)undersized_bytes) ==
+               MP_ERR_INVALID_ARGUMENT &&
+           ((mp_screen_info *)undersized_bytes)->struct_size == sizeof(uint32_t) &&
+           undersized_bytes[8] == 0xA5,
+           "undersized output is rejected without overwrite");
+    info.flags = 1;
+    EXPECT(api->screen_get_info(screen, &info) == MP_ERR_INVALID_ARGUMENT,
+           "nonzero output flags are rejected");
+    info.flags = 0;
+    uint8_t pixel[4] = {1, 2, 3, 4};
+    EXPECT(api->screen_update_region(screen, 0, 0, 1, 1, pixel,
+                                     sizeof(pixel), sizeof(pixel),
+                                     MP_PIXEL_FORMAT_ABGR) == MP_OK,
+           "region convenience update commits");
+    struct screen_entry *entry = nullptr;
+    int entry_index = screen_registry_find(&ctx->registry, "api-test");
+    if (entry_index >= 0) entry = ctx->registry.screens[entry_index];
+    EXPECT(entry != nullptr, "provider test resolves internal screen fixture");
+    struct video_session *media = video_engine_acquire(
+        &ctx->engine, entry->runtime_id);
+    EXPECT(media != nullptr, "video fixture session allocation");
+    media->active = 1;
+    media->screen_runtime_id = entry->runtime_id;
+    entry->playing = 1;
+    EXPECT(api->screen_update_region(screen, 0, 0, 1, 1, pixel,
+                                     sizeof(pixel), sizeof(pixel),
+                                     MP_PIXEL_FORMAT_BGRA) == MP_OK &&
+           video_engine_find(&ctx->engine, entry->runtime_id) == nullptr,
+           "external update releases active video producer");
+    mp_stats stats = {.struct_size = sizeof(stats), .flags = 0};
+    EXPECT(api->screen_get_stats(screen, &stats) == MP_OK &&
+           stats.generation > 0 && stats.resident_tiles == 1,
+           "surface stats expose committed pixels");
+    media = video_engine_acquire(&ctx->engine, entry->runtime_id);
+    EXPECT(media != nullptr, "second video fixture session allocation");
+    media->active = 1;
+    media->screen_runtime_id = entry->runtime_id;
+    entry->playing = 1;
+    mp_frame_handle media_frame = MP_INVALID_FRAME_HANDLE;
+    EXPECT(api->frame_begin(screen, &media_frame) == MP_OK &&
+           video_engine_find(&ctx->engine, entry->runtime_id) == nullptr &&
+           api->frame_abort(media_frame) == MP_OK,
+           "frame begin replaces active video producer");
+    mp_frame_handle frame = MP_INVALID_FRAME_HANDLE;
+    EXPECT(api->frame_begin(screen, &frame) == MP_OK && frame != 0,
+           "frame begin allocates a distinct handle");
+    EXPECT(mp_api_provider_screen_has_active_frame(entry->runtime_id),
+           "provider reports an active frame without aborting it");
+    EXPECT(api->frame_update_region(frame, 0, 0, 1, 1, pixel,
+                                     sizeof(pixel), sizeof(pixel),
+                                     MP_PIXEL_FORMAT_RGBA) == MP_OK &&
+           api->frame_commit(frame) == MP_OK,
+           "frame update and commit work");
+    EXPECT(!mp_api_provider_screen_has_active_frame(entry->runtime_id),
+           "provider active-frame query clears after commit");
+    EXPECT(api->frame_abort(frame) == MP_ERR_INVALID_HANDLE,
+           "committed frame handle is stale");
+    mp_frame_handle clear_frame = MP_INVALID_FRAME_HANDLE;
+    EXPECT(api->frame_begin(screen, &clear_frame) == MP_OK &&
+           api->screen_clear(screen) == MP_OK &&
+           api->frame_abort(clear_frame) == MP_ERR_INVALID_HANDLE,
+           "clear retires active frame handles safely");
+    EXPECT(api->screen_delete(screen) == MP_OK &&
+           api->screen_delete(screen) == MP_ERR_INVALID_HANDLE,
+           "delete rejects stale handles");
+    create.name = "command-stale";
+    mp_screen_handle command_screen = MP_INVALID_SCREEN_HANDLE;
+    EXPECT(api->screen_create(&create, &command_screen) == MP_OK,
+           "command-side stale-handle fixture creation");
+    mp_frame_handle stale_frame = MP_INVALID_FRAME_HANDLE;
+    EXPECT(api->frame_begin(command_screen, &stale_frame) == MP_OK,
+           "stale-handle fixture frame begin");
+    EXPECT(screen_registry_delete(&ctx->registry, "command-stale") == SCREEN_OK,
+           "simulate command-side deletion");
+    EXPECT(api->frame_abort(stale_frame) == MP_ERR_INVALID_HANDLE,
+           "command deletion rejects stale frame safely");
+    create.name = "retained";
+    mp_screen_handle retained = MP_INVALID_SCREEN_HANDLE;
+    EXPECT(api->screen_create(&create, &retained) == MP_OK,
+           "retained stale-handle fixture creation");
+    uint64_t old_instance = api->instance_id;
+    mp_api_provider_deactivate(ctx);
+    EXPECT(api->screen_find("api-renamed", &found) == MP_ERR_UNAVAILABLE,
+           "deactivation makes the provider unavailable");
+    ctx->active = 1;
+    mp_api_provider_activate(ctx);
+    api = endstone_mediaplayer_get_api(MP_API_V1);
+    EXPECT(api->instance_id != old_instance,
+           "reactivation allocates a new instance id");
+    EXPECT(api->screen_get_info(retained, &info) == MP_ERR_INVALID_HANDLE,
+           "old screen handle is rejected after reactivation");
+    EXPECT(api->screen_find("api-renamed", &found) == MP_ERR_NOT_FOUND,
+           "reactivation rejects stale object handles");
+    mp_api_provider_deactivate(ctx);
+    ctx->active = 0;
+    screen_registry_cleanup(&ctx->registry);
+    free(ctx);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--provider") == 0)
+        return test_public_provider_lifecycle() ? 0 : 1;
     if (argc == 3 && strcmp(argv[1], "--check-mcv") == 0)
         return check_external_mcv(argv[2]);
     if (argc == 3 && strcmp(argv[1], "--bench-mcv") == 0)
@@ -4613,6 +5928,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_geom_reversed_corners);
     RUN_TEST(test_geom_1x1);
     RUN_TEST(test_geom_7x4);
+    RUN_TEST(test_geom_checked_logical_limits);
     RUN_TEST(test_geom_width_exceed);
     RUN_TEST(test_geom_height_exceed);
     RUN_TEST(test_geom_not_vertical);
@@ -4648,6 +5964,8 @@ int main(int argc, char **argv)
     RUN_TEST(test_mcv_tile_pixel_and_fps_validation);
     RUN_TEST(test_mcv_close_clears_state);
     RUN_TEST(test_mcv_frame_crc_mismatch);
+    RUN_TEST(test_mcv_zlib_frame_crc_mismatch);
+    RUN_TEST(test_mcv_utf8_filename);
     RUN_TEST(test_mcv_frame_flags_validation);
     RUN_TEST(test_mcv_zlib_roundtrip);
     RUN_TEST(test_mcv_index_window);
@@ -4674,12 +5992,14 @@ int main(int argc, char **argv)
     RUN_TEST(test_engine_slot_lookup_by_runtime_id);
     RUN_TEST(test_engine_survives_other_screen_delete);
     RUN_TEST(test_session_finish_releases_resources);
+    RUN_TEST(test_session_start_failure_releases_resources);
 
     printf("\n[Screen Registry]\n");
     RUN_TEST(test_registry_create_find);
     RUN_TEST(test_registry_duplicate_name);
     RUN_TEST(test_registry_invalid_name);
     RUN_TEST(test_registry_runtime_identity_survives_shifts);
+    RUN_TEST(test_registry_lazy_tiles_and_cleanup);
     RUN_TEST(test_registry_delete);
 
     printf("\n[Persistence]\n");
@@ -4687,6 +6007,9 @@ int main(int argc, char **argv)
     RUN_TEST(test_persistence_omits_and_ignores_viewers);
     RUN_TEST(test_persistence_facing_range);
     RUN_TEST(test_managed_map_identity_roundtrip);
+    RUN_TEST(test_persistence_v1_migration_and_extremes);
+    RUN_TEST(test_persistence_v2_roundtrip_and_logical_size);
+    RUN_TEST(test_persistence_sidecar_corruption_matrix);
     RUN_TEST(test_persistence_corrupted);
     RUN_TEST(test_persistence_truncated);
     RUN_TEST(test_persistence_missing_file);
@@ -4698,11 +6021,15 @@ int main(int argc, char **argv)
 
     printf("\n[Command and Public Viewer Policy]\n");
     RUN_TEST(test_command_permission_and_surface);
+    RUN_TEST(test_mps_catalog_and_source_lifecycle);
     RUN_TEST(test_public_viewer_eligibility);
     RUN_TEST(test_public_viewer_collection_and_membership);
 
     printf("\n[Map Color]\n");
     RUN_TEST(test_map_test_patterns);
+
+    printf("\n[Public Provider ABI]\n");
+    RUN_TEST(test_public_provider_lifecycle);
 
 #if defined(ES_PLATFORM_WINDOWS)
     printf("\n[Map ABI]\n");

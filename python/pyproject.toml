@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "endstone-mediaplayer"
+version = "0.1.0"
+description = "ctypes bindings for the Endstone MediaPlayer provider ABI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0-only"}
+authors = [{name = "Endstone MediaPlayer contributors"}]
+
+[tool.setuptools]
+packages = ["endstone_mediaplayer"]

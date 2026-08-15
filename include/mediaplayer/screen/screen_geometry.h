@@ -3,8 +3,13 @@
 
 #include <stdint.h>
 
+// MCV v1 remains limited to 7x4 tiles.  Screen geometry is a logical
+// catalogue concept and deliberately has a larger bound; consumers that
+// produce MCV files must continue to enforce the format's own limits.
 #define SCREEN_MAX_WIDTH  7
 #define SCREEN_MAX_HEIGHT 4
+#define SCREEN_LOGICAL_MAX_WIDTH 1024
+#define SCREEN_LOGICAL_MAX_HEIGHT 1024
 #define SCREEN_TILE_SIZE  128
 
 enum screen_facing {
@@ -21,9 +26,14 @@ enum screen_geom_err {
     SCREEN_GEOM_ERR_WIDTH_EXCEED,
     SCREEN_GEOM_ERR_HEIGHT_EXCEED,
     SCREEN_GEOM_ERR_INVALID_FACING,
+    SCREEN_GEOM_ERR_WIDTH_INVALID,
+    SCREEN_GEOM_ERR_HEIGHT_INVALID,
 };
 
 const char *screen_geom_err_name(enum screen_geom_err error);
+
+// Checks logical dimensions before they are used for tile or pixel arithmetic.
+enum screen_geom_err screen_geom_validate_dimensions(int width, int height);
 
 struct screen_pos {
     int x, y, z;

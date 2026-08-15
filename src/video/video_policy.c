@@ -7,9 +7,12 @@ const char *const mpv_command_usages[MPV_COMMAND_USAGE_COUNT] = {
     "/mpv (screens)<a: MpvScreens>",
     "/mpv (list)<a: MpvList> [filter: string]",
     "/mpv (create)<a: MpvCreate> <name: string>",
+    "/mpv (materialize)<a: MpvMaterialize> <name: string>",
     "/mpv (delete)<a: MpvDelete> <name: string>",
     "/mpv (info)<a: MpvInfo> <name: string>",
     "/mpv (play)<a: MpvPlay> <screen: string> <video: int> [loop: int]",
+    "/mpv (images)<a: MpvImages> [filter: string]",
+    "/mpv (image)<a: MpvImage> <screen: string> <image: int>",
     "/mpv (pause)<a: MpvPause> <name: string>",
     "/mpv (resume)<a: MpvResume> <name: string>",
     "/mpv (stop)<a: MpvStop> <name: string>",
@@ -31,8 +34,9 @@ bool mpv_command_allowed(bool is_player, bool is_op, const char *action)
 bool mpv_command_action_registered(const char *action)
 {
     static const char *const actions[] = {
-        "help", "screens", "list", "create", "delete", "info",
-        "play", "pause", "resume", "stop", "status", "watch",
+        "help", "screens", "list", "create", "materialize", "delete", "info",
+        "play", "images", "image", "pause", "resume", "stop", "status",
+        "watch",
 #if defined(ENABLE_MPV_DEBUG_COMMANDS)
         "debug",
 #endif
@@ -60,14 +64,35 @@ bool mpv_public_viewer_eligible(bool online,
 {
     if (!online || !snapshot || !snapshot->valid || !screen ||
         !snapshot->dimension[0] ||
-        strcmp(snapshot->dimension, screen->dimension) != 0) {
+        strncmp(snapshot->dimension, screen->dimension,
+                sizeof(snapshot->dimension)) != 0) {
         return false;
     }
 
-    struct mpv_screen_center center = mpv_screen_center(screen);
-    double dx = snapshot->x - center.x;
-    double dy = snapshot->y - center.y;
-    double dz = snapshot->z - center.z;
+    double min_x = screen->corner1.x < screen->corner2.x
+                       ? screen->corner1.x
+                       : screen->corner2.x;
+    double min_y = screen->corner1.y < screen->corner2.y
+                       ? screen->corner1.y
+                       : screen->corner2.y;
+    double min_z = screen->corner1.z < screen->corner2.z
+                       ? screen->corner1.z
+                       : screen->corner2.z;
+    double max_x = (screen->corner1.x > screen->corner2.x
+                        ? screen->corner1.x
+                        : screen->corner2.x) + 1.0;
+    double max_y = (screen->corner1.y > screen->corner2.y
+                        ? screen->corner1.y
+                        : screen->corner2.y) + 1.0;
+    double max_z = (screen->corner1.z > screen->corner2.z
+                        ? screen->corner1.z
+                        : screen->corner2.z) + 1.0;
+    double dx = snapshot->x < min_x ? min_x - snapshot->x
+              : snapshot->x > max_x ? snapshot->x - max_x : 0.0;
+    double dy = snapshot->y < min_y ? min_y - snapshot->y
+              : snapshot->y > max_y ? snapshot->y - max_y : 0.0;
+    double dz = snapshot->z < min_z ? min_z - snapshot->z
+              : snapshot->z > max_z ? snapshot->z - max_z : 0.0;
     return dx * dx + dy * dy + dz * dz <=
            MPV_PUBLIC_VIEW_DISTANCE_SQUARED;
 }

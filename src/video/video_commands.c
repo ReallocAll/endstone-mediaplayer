@@ -9,6 +9,7 @@
 #include "mediaplayer/bedrock/world_bridge.h"
 #include "mediaplayer/bedrock/world_read_abi.h"
 #include "mediaplayer/endstone_api.h"
+#include "mediaplayer/api_provider.h"
 #include "endstone_abi.h"
 #include "abi_helpers.h"
 #include <stdio.h>
@@ -77,8 +78,10 @@ void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin,
     char video_dir[560];
     snprintf(video_dir, sizeof(video_dir), "%s/video", data_dir);
     video_catalog_init(&ctx->catalog, video_dir);
+    mps_catalog_init(&ctx->image_catalog, video_dir);
 
     video_engine_init(&ctx->engine);
+    mps_source_engine_init(&ctx->image_engine);
     screen_audio_engine_init(&ctx->audio);
     map_render_init(&ctx->render, server, plugin);
 
@@ -98,17 +101,19 @@ void video_ctx_shutdown(struct video_ctx *ctx)
 
     // Detach renderers before freeing session frame buffers.
     for (int i = 0; i < ctx->registry.count; i++)
-        map_render_clear(&ctx->render, &ctx->registry.screens[i]);
+        map_render_clear(&ctx->render, ctx->registry.screens[i]);
     screen_audio_engine_shutdown(&ctx->audio);
     video_engine_shutdown(&ctx->engine);
+    mps_source_engine_shutdown(&ctx->image_engine);
 
     for (int i = 0; i < ctx->registry.count; i++) {
-        if (ctx->registry.screens[i].tiles_initialized)
-            map_render_destroy_screen(&ctx->render, &ctx->registry.screens[i]);
+        if (ctx->registry.screens[i]->tiles_initialized)
+            map_render_destroy_screen(&ctx->render, ctx->registry.screens[i]);
     }
 
     screen_persistence_save(&ctx->registry, ctx->save_path);
     mpv_preferences_save(&ctx->preferences, ctx->preferences_path);
+    screen_registry_cleanup(&ctx->registry);
 }
 
 // --- Public viewer snapshots and membership ---
@@ -150,6 +155,82 @@ static int collect_public_viewers(struct video_ctx *ctx,
                                       64);
 }
 
+static int collect_presenter_viewers(
+    struct video_ctx *ctx, struct presenter_viewer out[64])
+{
+    int count = 0;
+    for (int i = 0; i < ctx->online_count; i++) {
+        struct video_online_player *online = &ctx->online_players[i];
+        if (!online->player || !online->public_media_enabled ||
+            !online->snapshot.valid)
+            continue;
+        struct presenter_viewer *viewer = &out[count++];
+        memset(viewer, 0, sizeof(*viewer));
+        viewer->player = online->player;
+        viewer->stable_id = (uint64_t)(i + 1);
+        viewer->x = online->snapshot.x;
+        viewer->y = online->snapshot.y;
+        viewer->z = online->snapshot.z;
+        snprintf(viewer->dimension, sizeof(viewer->dimension), "%s",
+                 online->snapshot.dimension);
+    }
+    return count;
+}
+
+static struct presenter_viewer presenter_viewer_from_online(
+    const struct video_online_player *online)
+{
+    struct presenter_viewer viewer = {0};
+    viewer.player = online->player;
+    viewer.x = online->snapshot.x;
+    viewer.y = online->snapshot.y;
+    viewer.z = online->snapshot.z;
+    snprintf(viewer.dimension, sizeof(viewer.dimension), "%s",
+             online->snapshot.dimension);
+    return viewer;
+}
+
+static void queue_resend(struct video_online_player *online,
+                         uint64_t screen_runtime_id, uint64_t attachment_id)
+{
+    for (int i = 0; i < online->resend_count; i++) {
+        if (online->resend_jobs[i].screen_runtime_id == screen_runtime_id) {
+            online->resend_jobs[i].attachment_id = attachment_id;
+            online->resend_jobs[i].cursor.index = 0;
+            return;
+        }
+    }
+    if (online->resend_count >= MPV_RESEND_JOBS_MAX)
+        return;
+    struct video_resend_job *job =
+        &online->resend_jobs[online->resend_count++];
+    memset(job, 0, sizeof(*job));
+    job->screen_runtime_id = screen_runtime_id;
+    job->attachment_id = attachment_id;
+}
+
+static struct screen_entry *find_screen_runtime(struct video_ctx *ctx,
+                                                uint64_t runtime_id)
+{
+    for (int i = 0; i < ctx->registry.count; i++) {
+        if (ctx->registry.screens[i]->runtime_id == runtime_id)
+            return ctx->registry.screens[i];
+    }
+    return nullptr;
+}
+
+static void remove_resend_job(struct video_online_player *online, int index)
+{
+    for (int i = index; i < online->resend_count - 1; i++)
+        online->resend_jobs[i] = online->resend_jobs[i + 1];
+    online->resend_count--;
+    memset(&online->resend_jobs[online->resend_count], 0,
+           sizeof(online->resend_jobs[0]));
+}
+
+static void stop_screen_playback(struct video_ctx *ctx,
+                                 struct screen_entry *screen);
+
 static void refresh_public_viewers(struct video_ctx *ctx)
 {
     for (int p = 0; p < ctx->online_count; p++) {
@@ -159,7 +240,7 @@ static void refresh_public_viewers(struct video_ctx *ctx)
         uint64_t eligible_ids[SCREEN_REGISTRY_MAX];
         int eligible_count = 0;
         for (int s = 0; s < ctx->registry.count; s++) {
-            struct screen_entry *screen = &ctx->registry.screens[s];
+            struct screen_entry *screen = ctx->registry.screens[s];
             bool eligible = online->public_media_enabled &&
                 mpv_public_viewer_eligible(
                     true, &online->snapshot, &screen->geom);
@@ -171,14 +252,80 @@ static void refresh_public_viewers(struct video_ctx *ctx)
             eligible_ids[eligible_count++] = screen->runtime_id;
             if (transition == MPV_MEMBERSHIP_ENTERED &&
                 screen->tiles_initialized) {
-                void *players[] = {online->player};
-                const char *player_ids[] = {online->uuid};
-                map_render_resend(&ctx->render, screen, players,
-                                  player_ids, 1);
+                struct mps_source *source = mps_source_find(
+                    &ctx->image_engine, screen->runtime_id);
+                queue_resend(online, screen->runtime_id,
+                             source ? source->attachment_id : 0);
             }
         }
         mpv_membership_replace(&online->membership, eligible_ids,
                                eligible_count);
+    }
+}
+
+static void process_resend_jobs(struct video_ctx *ctx)
+{
+    size_t remaining = 64;
+    for (int p = 0; p < ctx->online_count && remaining > 0; p++) {
+        struct video_online_player *online = &ctx->online_players[p];
+        int job_index = 0;
+        while (job_index < online->resend_count && remaining > 0) {
+            struct video_resend_job *job = &online->resend_jobs[job_index];
+            struct screen_entry *screen = find_screen_runtime(
+                ctx, job->screen_runtime_id);
+            if (!screen || !online->public_media_enabled ||
+                !mpv_membership_contains(&online->membership,
+                                         job->screen_runtime_id)) {
+                remove_resend_job(online, job_index);
+                continue;
+            }
+            struct mps_source *source = mps_source_find(
+                &ctx->image_engine, screen->runtime_id);
+            if (source && job->attachment_id != source->attachment_id) {
+                job->attachment_id = source->attachment_id;
+                job->cursor.index = 0;
+            } else if (!source && job->attachment_id != 0) {
+                struct video_session *replacement = video_engine_find(
+                    &ctx->engine, screen->runtime_id);
+                if (!replacement) {
+                    remove_resend_job(online, job_index);
+                    continue;
+                }
+                job->attachment_id = 0;
+                job->cursor.index = 0;
+            }
+            struct presenter_viewer viewer =
+                presenter_viewer_from_online(online);
+            struct presenter_stats stats;
+            bool done = false;
+            enum map_render_error render_error;
+            if (source) {
+                render_error = map_render_resend_stream(
+                    &ctx->render, screen, &viewer,
+                    source->file.header.tile_count, &job->cursor.index,
+                    remaining, mps_source_presenter_read, source, &done,
+                    &stats);
+            } else {
+                render_error = (enum map_render_error)map_render_resend(
+                    &ctx->render, screen, &viewer, &job->cursor, remaining,
+                    &done, &stats);
+            }
+            if (render_error != MAP_RENDER_OK) {
+                if (source) {
+                    stop_screen_playback(ctx, screen);
+                    remove_resend_job(online, job_index);
+                }
+                break;
+            }
+            if (stats.examined > remaining)
+                break;
+            remaining -= stats.examined;
+            if (done) {
+                remove_resend_job(online, job_index);
+                continue;
+            }
+            job_index++;
+        }
     }
 }
 
@@ -190,6 +337,7 @@ static void stop_screen_playback(struct video_ctx *ctx,
     map_render_clear(&ctx->render, screen);
     screen_audio_stop(&ctx->audio, screen->runtime_id);
     video_engine_release(&ctx->engine, screen->runtime_id);
+    mps_source_release(&ctx->image_engine, screen->runtime_id);
     screen->playing = 0;
 }
 
@@ -203,15 +351,37 @@ void video_tick(struct video_ctx *ctx)
         refresh_public_viewers(ctx);
     ctx->public_viewer_tick =
         (ctx->public_viewer_tick + 1) % MPV_PUBLIC_VIEWER_REFRESH_TICKS;
+    process_resend_jobs(ctx);
 
     int64_t now = get_mono_ms();
 
     for (int i = 0; i < ctx->registry.count; i++) {
-        struct screen_entry *screen = &ctx->registry.screens[i];
+        struct screen_entry *screen = ctx->registry.screens[i];
+        struct presenter_viewer presenter_viewers[64];
+        int presenter_viewer_count = collect_presenter_viewers(
+            ctx, presenter_viewers);
+        struct mps_source *source = mps_source_find(
+            &ctx->image_engine, screen->runtime_id);
         struct video_session *sess =
             video_engine_find(&ctx->engine, screen->runtime_id);
-        if (!sess || sess->state != PLAY_PLAYING)
+        if (source) {
+            struct presenter_stats stats;
+            bool done = false;
+            enum map_render_error render_error = map_render_present_stream(
+                &ctx->render, screen, presenter_viewers,
+                (size_t)presenter_viewer_count,
+                source->file.header.tile_count, &source->initial_cursor, 28,
+                mps_source_presenter_read, source, &done, &stats);
+            if (render_error != MAP_RENDER_OK)
+                stop_screen_playback(ctx, screen);
             continue;
+        }
+        if (!sess || sess->state != PLAY_PLAYING) {
+            struct presenter_stats stats;
+            map_render_present(&ctx->render, screen, presenter_viewers,
+                               (size_t)presenter_viewer_count, 28, &stats);
+            continue;
+        }
 
         struct video_tick_result tick;
         video_session_tick_detailed(sess, now, &tick);
@@ -233,10 +403,14 @@ void video_tick(struct video_ctx *ctx)
 
         if (tick.frame_changed) {
             if (video_session_load_frame(sess, tick.frame) == 0) {
-                map_render_send_frame(&ctx->render, screen, sess->frame_buf,
-                                      op, oids, viewer_count);
+                map_render_submit_frame(
+                    screen, sess->frame_buf, sess->frame_buf_size,
+                    SURFACE_FORMAT_ABGR8888);
             }
         }
+        struct presenter_stats stats;
+        map_render_present(&ctx->render, screen, presenter_viewers,
+                           (size_t)presenter_viewer_count, 28, &stats);
     }
 }
 
@@ -248,11 +422,14 @@ static void cmd_help(struct video_ctx *ctx, void *sender)
     sender_send_message(sender, MC_GRAY "───── " MC_GREEN "MediaPlayer " MC_AQUA "Video" MC_GRAY " ─────");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "list " MC_GRAY "[filter]");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "create " MC_GRAY "<name>");
+    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "materialize " MC_GRAY "<name>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "delete " MC_GRAY "<name>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "screens");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "info " MC_GRAY "<name>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "play " MC_GRAY "<screen> <index> [loop]");
-    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "pause" MC_GRAY " | " MC_YELLOW "resume" MC_GRAY " | " MC_YELLOW "stop " MC_GRAY "<screen>");
+    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "images " MC_GRAY "[filter]");
+    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "image " MC_GRAY "<screen> <image-index>");
+    sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "pause " MC_GRAY "<screen>" MC_GRAY " | " MC_YELLOW "resume " MC_GRAY "<screen>" MC_GRAY " | " MC_YELLOW "stop " MC_GRAY "<screen>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "status " MC_GRAY "<screen>");
     sender_send_message(sender, MC_GRAY " /mpv " MC_YELLOW "watch " MC_GRAY "[on|off]");
     sender_send_message(sender, MC_GRAY "── " MC_AQUA "Loop" MC_GRAY " ──  " MC_GRAY "-1=infinite  1=once  N=times");
@@ -285,6 +462,35 @@ static void cmd_list(struct video_ctx *ctx, void *sender, int argc, const char *
     } else if (filter) {
         char buf[64];
         snprintf(buf, sizeof(buf), MC_GREEN "[MediaPlayer] " MC_GRAY "[MediaPlayer] " MC_GRAY "%d matched", shown);
+        sender_send_message(sender, buf);
+    }
+}
+
+static void cmd_images(struct video_ctx *ctx, void *sender, int argc,
+                       const char **argv)
+{
+    mps_catalog_refresh(&ctx->image_catalog);
+    const char *filter = argc > 1 ? argv[1] : nullptr;
+    int shown = 0;
+    for (int i = 0; i < ctx->image_catalog.count; i++) {
+        const struct mps_image_entry *entry =
+            &ctx->image_catalog.entries[i];
+        if (filter && strstr(entry->name, filter) == nullptr)
+            continue;
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 MC_GREEN "[MediaPlayer] " MC_GRAY "[%d] " MC_YELLOW
+                 "%s " MC_GRAY "(%ux%u tiles)", i, entry->name,
+                 entry->tile_width, entry->tile_height);
+        sender_send_message(sender, buf);
+        shown++;
+    }
+    if (shown == 0) {
+        sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY
+                             "No valid .mps files in video folder");
+    } else if (filter) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), MC_GRAY "%d matched", shown);
         sender_send_message(sender, buf);
     }
 }
@@ -402,6 +608,11 @@ static int discover_backing_geometry(
         neighbours[3].y++;
 
         for (int n = 0; n < 4; n++) {
+            // The player's feet-level air cell defines the screen bottom.
+            // Floors and backing connected below it are construction support,
+            // not part of the discovered display rectangle.
+            if (neighbours[n].y < seed.y) continue;
+
             int seen = 0;
             for (int i = 0; i < count; i++) {
                 if (same_pos(blocks[i], neighbours[n])) {
@@ -503,6 +714,7 @@ static int discover_backing_geometry(
             }
         }
     }
+
     return 0;
 }
 
@@ -576,10 +788,13 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
     snprintf(draft.name, sizeof(draft.name), "%s", name);
     snprintf(draft.owner_uuid, sizeof(draft.owner_uuid), "%s", player_uuid);
     draft.geom = geom;
-    for (int i = 0; i < SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT; i++)
-        draft.tiles[i].map_id = -1;
+    if (screen_entry_materialize_tiles(&draft) != SCREEN_OK) {
+        send_err(sender, "Unable to allocate screen tile storage.");
+        return;
+    }
     if (map_render_init_screen(&ctx->render, &draft, player) !=
         MAP_RENDER_OK) {
+        screen_entry_cleanup_tiles(&draft);
         send_err(sender, "Unable to allocate all %d maps.", tile_count);
         return;
     }
@@ -602,6 +817,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
             for (int i = 0; i < prepared_count; i++)
                 mp_world_prepared_destroy(prepared[i]);
             map_render_destroy_screen(&ctx->render, &draft);
+            screen_entry_cleanup_tiles(&draft);
             send_err(sender, "Unable to prepare tile %d: %s.", tile,
                      detail[0] ? detail : mp_world_result_name(result));
             return;
@@ -627,6 +843,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
                     screen_geom_tile_pos(&geom, col, row));
             }
             map_render_destroy_screen(&ctx->render, &draft);
+            screen_entry_cleanup_tiles(&draft);
             send_err(sender,
                      "Item-frame placement failed at tile %d; rolled back %d tiles: %s.",
                      tile, placed_count,
@@ -650,6 +867,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
         for (int i = 0; i < tile_count; i++)
             mp_world_prepared_destroy(prepared[i]);
         map_render_destroy_screen(&ctx->render, &draft);
+        screen_entry_cleanup_tiles(&draft);
         send_err(sender, "Map delivery failed; frame placement was rolled back: %s.",
                  detail[0] ? detail : mp_world_result_name(delivered));
         return;
@@ -668,16 +886,19 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
                 screen_geom_tile_pos(&geom, col, row));
         }
         map_render_destroy_screen(&ctx->render, &draft);
+        screen_entry_cleanup_tiles(&draft);
         for (int i = 0; i < tile_count; i++)
             mp_world_prepared_destroy(prepared[i]);
         send_err(sender, "Screen registration failed; creation was rolled back.");
         return;
     }
 
-    struct screen_entry *committed = &ctx->registry.screens[index];
+    struct screen_entry *committed = ctx->registry.screens[index];
     committed->plugin_managed = 1;
-    for (int tile = 0; tile < tile_count; tile++)
-        committed->tiles[tile] = draft.tiles[tile];
+    committed->tiles = draft.tiles;
+    committed->tiles_capacity = draft.tiles_capacity;
+    draft.tiles = nullptr;
+    draft.tiles_capacity = 0;
     committed->tiles_initialized = 1;
     draft.tiles_initialized = 0;
     if (screen_persistence_save(&ctx->registry, ctx->save_path) != 0) {
@@ -691,6 +912,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
         }
         map_render_destroy_screen(&ctx->render, committed);
         screen_registry_delete(&ctx->registry, name);
+        screen_entry_cleanup_tiles(&draft);
         for (int i = 0; i < tile_count; i++)
             mp_world_prepared_destroy(prepared[i]);
         send_err(sender, "Screen persistence failed; creation was rolled back.");
@@ -714,6 +936,237 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
     sender_send_message(sender, buffer);
 }
 
+static int materialize_screen_busy(struct video_ctx *ctx,
+                                   const struct screen_entry *screen)
+{
+    if (!ctx || !screen) return 0;
+    return screen->playing ||
+           video_engine_find(&ctx->engine, screen->runtime_id) != nullptr ||
+           mps_source_find(&ctx->image_engine, screen->runtime_id) != nullptr ||
+           screen_audio_find(&ctx->audio, screen->runtime_id) != nullptr ||
+           mp_api_provider_screen_has_active_frame(screen->runtime_id);
+}
+
+static void materialize_discard_stage(
+    struct video_ctx *ctx, struct screen_entry *draft,
+    struct mp_world_prepared_tile *const *prepared, int prepared_count,
+    void *player, int placed_count, int maps_delivered)
+{
+    if (maps_delivered)
+        mp_world_retract_prepared_maps(player, prepared, prepared_count);
+    for (int i = 0; i < placed_count; i++) {
+        int col = i % draft->geom.width;
+        int row = i / draft->geom.width;
+        mp_world_rollback_placed(
+            ctx->render.server, player, draft->geom.dimension,
+            screen_geom_tile_pos(&draft->geom, col, row));
+    }
+    for (int i = 0; i < prepared_count; i++)
+        mp_world_prepared_destroy(prepared[i]);
+    if (draft->tiles_initialized)
+        map_render_destroy_screen(&ctx->render, draft);
+    screen_entry_cleanup_tiles(draft);
+}
+
+static int materialize_restore_persisted_state(
+    struct video_ctx *ctx, struct screen_entry *screen,
+    const struct screen_entry *old_state)
+{
+    map_render_destroy_screen(&ctx->render, screen);
+    screen_entry_cleanup_tiles(screen);
+    screen->geom = old_state->geom;
+    memcpy(screen->owner_uuid, old_state->owner_uuid,
+           sizeof(screen->owner_uuid));
+    screen->plugin_managed = old_state->plugin_managed;
+    screen->tiles = old_state->tiles;
+    screen->tiles_capacity = old_state->tiles_capacity;
+    screen->tiles_initialized = old_state->tiles_initialized;
+    screen->playing = old_state->playing;
+    return screen_persistence_save(&ctx->registry, ctx->save_path);
+}
+
+static void cmd_screen_materialize(struct video_ctx *ctx, void *sender,
+                                   void *player, const char *player_uuid,
+                                   int argc, const char **argv)
+{
+    if (!player || !player_uuid) {
+        send_err(sender, "Materializing a screen requires an OP player.");
+        return;
+    }
+    if (argc != 2) {
+        send_err(sender, "Usage: /mpv materialize <name>");
+        return;
+    }
+
+    int index = screen_registry_find(&ctx->registry, argv[1]);
+    if (index < 0) {
+        send_err(sender, "Screen '%s' not found.", argv[1]);
+        return;
+    }
+    struct screen_entry *screen = ctx->registry.screens[index];
+    if (!screen || screen->plugin_managed ||
+        strcmp(screen->geom.dimension, "logical") != 0 ||
+        screen->tiles != nullptr || screen->tiles_initialized) {
+        send_err(sender,
+                 "Screen '%s' is not an eligible logical screen; only an "
+                 "API-created logical screen can be materialized.", argv[1]);
+        return;
+    }
+    if (materialize_screen_busy(ctx, screen)) {
+        send_err(sender,
+                 "Screen '%s' is busy; stop playback, image/audio producers, "
+                 "and active frame updates before materializing it.", argv[1]);
+        return;
+    }
+
+    struct mp_player_snapshot snapshot = {0};
+    char detail[256] = {0};
+    if (!mp_player_get_snapshot(player, &snapshot, detail,
+                                (int)sizeof(detail))) {
+        send_err(sender, "Unable to resolve player location: %s.",
+                 detail[0] ? detail : "unknown bridge error");
+        return;
+    }
+
+    struct screen_geom geom = {0};
+    if (discover_backing_geometry(player, &snapshot, &geom,
+                                  detail, sizeof(detail)) != 0) {
+        send_err(sender, "Backing/world validation failed: %s.",
+                 detail[0] ? detail : "unknown bridge error");
+        return;
+    }
+    if (geom.width != screen->geom.width || geom.height != screen->geom.height) {
+        send_err(sender,
+                 "Backing size mismatch: logical screen is %dx%d but the "
+                 "discovered backing is %dx%d.",
+                 screen->geom.width, screen->geom.height,
+                 geom.width, geom.height);
+        return;
+    }
+    if (!mp_world_managed_frames_supported()) {
+        send_err(sender,
+                 "Backing/world materialization is unavailable on this "
+                 "Endstone build.");
+        return;
+    }
+
+    int tile_count = screen_geom_tile_count(&geom);
+    int available_slots = 0;
+    enum mp_world_result capacity = mp_world_check_inventory_capacity(
+        player, tile_count, &available_slots, detail, (int)sizeof(detail));
+    if (capacity != MP_WORLD_OK) {
+        send_err(sender, "Backing/world inventory validation failed: %s.",
+                 detail[0] ? detail : mp_world_result_name(capacity));
+        return;
+    }
+
+    struct screen_entry draft = {0};
+    memcpy(draft.name, screen->name, sizeof(draft.name));
+    draft.geom = geom;
+    if (screen_entry_materialize_tiles(&draft) != SCREEN_OK) {
+        send_err(sender, "Unable to allocate materialization tile storage.");
+        return;
+    }
+    if (map_render_init_screen(&ctx->render, &draft, player) != MAP_RENDER_OK) {
+        screen_entry_cleanup_tiles(&draft);
+        send_err(sender, "Unable to allocate the materialization maps.");
+        return;
+    }
+
+    struct mp_world_prepared_tile *prepared[
+        SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {0};
+    int prepared_count = 0;
+    for (int tile = 0; tile < tile_count; tile++) {
+        int col = tile % geom.width;
+        int row = tile / geom.width;
+        struct screen_pos cell = screen_geom_tile_pos(&geom, col, row);
+        struct screen_pos backing = screen_geom_backing_pos(&geom, col, row);
+        detail[0] = '\0';
+        enum mp_world_result result = mp_world_prepare_tile(
+            ctx->render.server, player, geom.dimension, cell, backing,
+            geom.facing, draft.tiles[tile].map_view, draft.tiles[tile].map_id,
+            draft.name, tile, tile_count, row, col, &prepared[tile], detail,
+            (int)sizeof(detail));
+        if (result != MP_WORLD_OK) {
+            materialize_discard_stage(ctx, &draft, prepared, prepared_count,
+                                      player, 0, 0);
+            send_err(sender, "Backing/world preparation failed at tile %d: %s.",
+                     tile, detail[0] ? detail : mp_world_result_name(result));
+            return;
+        }
+        prepared_count++;
+    }
+
+    int placed_count = 0;
+    for (int tile = 0; tile < tile_count; tile++) {
+        detail[0] = '\0';
+        enum mp_world_result result = mp_world_place_prepared(
+            prepared[tile], detail, (int)sizeof(detail));
+        if (result != MP_WORLD_OK) {
+            materialize_discard_stage(ctx, &draft, prepared, prepared_count,
+                                      player, placed_count, 0);
+            send_err(sender,
+                     "Backing/world frame placement failed at tile %d; "
+                     "rolled back %d tiles: %s.", tile, placed_count,
+                     detail[0] ? detail : mp_world_result_name(result));
+            return;
+        }
+        placed_count++;
+    }
+
+    detail[0] = '\0';
+    enum mp_world_result delivered = mp_world_deliver_prepared_maps(
+        player, prepared, tile_count, detail, (int)sizeof(detail));
+    if (delivered != MP_WORLD_OK) {
+        materialize_discard_stage(ctx, &draft, prepared, prepared_count,
+                                  player, placed_count, 1);
+        send_err(sender,
+                 "Backing/world map delivery failed; frame placement was "
+                 "rolled back: %s.",
+                 detail[0] ? detail : mp_world_result_name(delivered));
+        return;
+    }
+
+    struct screen_entry old_state = *screen;
+    screen->geom = draft.geom;
+    snprintf(screen->owner_uuid, sizeof(screen->owner_uuid), "%s", player_uuid);
+    screen->plugin_managed = 1;
+    screen->tiles = draft.tiles;
+    screen->tiles_capacity = draft.tiles_capacity;
+    screen->tiles_initialized = draft.tiles_initialized;
+    draft.tiles = nullptr;
+    draft.tiles_capacity = 0;
+    draft.tiles_initialized = 0;
+
+    if (screen_persistence_save(&ctx->registry, ctx->save_path) != 0) {
+        materialize_discard_stage(ctx, &draft, prepared, prepared_count,
+                                  player, placed_count, 1);
+        int restored = materialize_restore_persisted_state(ctx, screen,
+                                                            &old_state);
+        send_err(sender,
+                 "Screen persistence failed; materialization was rolled back "
+                 "(%s).",
+                 restored == 0 ? "persistent state restored"
+                               : "persistent state restore also failed");
+        return;
+    }
+
+    for (int i = 0; i < prepared_count; i++)
+        mp_world_prepared_destroy(prepared[i]);
+    ctx->public_viewer_tick = 0;
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), MC_GREEN "[MediaPlayer] " MC_GRAY
+             "Logical screen '%s' materialized (%dx%d, facing %s).",
+             screen->name, geom.width, geom.height,
+             screen_facing_name(geom.facing));
+    sender_send_message(sender, buffer);
+    snprintf(buffer, sizeof(buffer), MC_YELLOW "[MediaPlayer] " MC_GRAY
+             "%d labeled maps were put in your inventory. Install them "
+             "left-to-right, top-to-bottom by their row/col labels.",
+             tile_count);
+    sender_send_message(sender, buffer);
+}
+
 static void cmd_screen_delete(struct video_ctx *ctx, void *sender, void *player,
                               int argc, const char **argv)
 {
@@ -728,7 +1181,7 @@ static void cmd_screen_delete(struct video_ctx *ctx, void *sender, void *player,
         return;
     }
 
-    struct screen_entry *screen = &ctx->registry.screens[idx];
+    struct screen_entry *screen = ctx->registry.screens[idx];
     if (screen->plugin_managed) {
         if (!player) {
             send_err(sender, "Deleting a managed screen requires a player in its dimension.");
@@ -789,10 +1242,10 @@ static void cmd_screen_delete(struct video_ctx *ctx, void *sender, void *player,
     }
 
     // Stop by runtime ID before compacting the registry.
-    stop_screen_playback(ctx, &ctx->registry.screens[idx]);
+    stop_screen_playback(ctx, ctx->registry.screens[idx]);
 
-    if (ctx->registry.screens[idx].tiles_initialized)
-        map_render_destroy_screen(&ctx->render, &ctx->registry.screens[idx]);
+    if (ctx->registry.screens[idx]->tiles_initialized)
+        map_render_destroy_screen(&ctx->render, ctx->registry.screens[idx]);
 
     screen_registry_delete(&ctx->registry, argv[1]);
     screen_persistence_save(&ctx->registry, ctx->save_path);
@@ -811,7 +1264,7 @@ static void cmd_screen_list(struct video_ctx *ctx, void *sender)
         return;
     }
     for (int i = 0; i < ctx->registry.count; i++) {
-        struct screen_entry *e = &ctx->registry.screens[i];
+        struct screen_entry *e = ctx->registry.screens[i];
         char buf[256];
         snprintf(buf, sizeof(buf), MC_GRAY "%d. " MC_WHITE "%s " MC_GRAY "(%dx%d, public, %s)",
                  i + 1, e->name, e->geom.width, e->geom.height,
@@ -833,7 +1286,7 @@ static void cmd_screen_info(struct video_ctx *ctx, void *sender, int argc, const
         return;
     }
 
-    struct screen_entry *e = &ctx->registry.screens[idx];
+    struct screen_entry *e = ctx->registry.screens[idx];
     char buf[256];
     snprintf(buf, sizeof(buf), MC_AQUA "Screen: " MC_WHITE "%s", e->name);
     sender_send_message(sender, buf);
@@ -890,7 +1343,7 @@ static void cmd_play(struct video_ctx *ctx, void *sender, void *player,
         return;
     }
 
-    struct screen_entry *screen = &ctx->registry.screens[scr_idx];
+    struct screen_entry *screen = ctx->registry.screens[scr_idx];
     int map_init_result = ensure_screen_maps(ctx, screen, player);
     if (map_init_result != 0) {
         send_err(sender, "Screen maps could not be initialized (%d).",
@@ -969,6 +1422,63 @@ static void cmd_play(struct video_ctx *ctx, void *sender, void *player,
     }
 }
 
+static void cmd_image(struct video_ctx *ctx, void *sender, void *player,
+                      int argc, const char **argv)
+{
+    if (argc < 3) {
+        send_err(sender, "Usage: /mpv image <screen> <image-index>");
+        return;
+    }
+    int screen_index = screen_registry_find(&ctx->registry, argv[1]);
+    if (screen_index < 0) {
+        send_err(sender, "Screen '%s' not found.", argv[1]);
+        return;
+    }
+    struct screen_entry *screen = ctx->registry.screens[screen_index];
+    int map_init_result = ensure_screen_maps(ctx, screen, player);
+    if (map_init_result != 0) {
+        send_err(sender, "Screen maps could not be initialized (%d).",
+                 map_init_result);
+        return;
+    }
+
+    mps_catalog_refresh(&ctx->image_catalog);
+    int image_index = 0;
+    if (!mpv_parse_index(argv[2], ctx->image_catalog.count, &image_index)) {
+        send_err(sender,
+                 "Image index out of range. Use /mpv images to see indices.");
+        return;
+    }
+    const struct mps_image_entry *image =
+        &ctx->image_catalog.entries[image_index];
+    if ((int)image->tile_width != screen->geom.width ||
+        (int)image->tile_height != screen->geom.height) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), MC_RED "Image is %ux%u tiles but screen is %dx%d.",
+                 image->tile_width, image->tile_height,
+                 screen->geom.width, screen->geom.height);
+        sender_send_message(sender, buf);
+        return;
+    }
+
+    stop_screen_playback(ctx, screen);
+    struct mps_source *source = nullptr;
+    enum mps_source_error source_error = mps_source_start(
+        &ctx->image_engine, screen->runtime_id, image->path, image->name,
+        screen->geom.width, screen->geom.height, &source);
+    if (source_error != MPS_SOURCE_OK) {
+        send_err(sender, "Failed to open image '%s': %s.", image->name,
+                 mps_source_error_name(source_error));
+        return;
+    }
+    screen->playing = 1;
+    char buf[160];
+    snprintf(buf, sizeof(buf), MC_GREEN "[MediaPlayer] " MC_GRAY
+             "Displaying image '%s' on screen '%s'.", image->name,
+             screen->name);
+    sender_send_message(sender, buf);
+}
+
 static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
                                   int argc, const char **argv, int action)
 {
@@ -986,10 +1496,14 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
         return;
     }
 
+    struct screen_entry *screen = ctx->registry.screens[scr_idx];
     struct video_session *sess = video_engine_find(
-        &ctx->engine, ctx->registry.screens[scr_idx].runtime_id);
-    if (!sess) {
-        send_err(sender, "Screen is not playing.");
+        &ctx->engine, screen->runtime_id);
+    struct mps_source *source = mps_source_find(
+        &ctx->image_engine, screen->runtime_id);
+    if (action != 0 && !sess) {
+        send_err(sender, source ? "Static images do not support pause/resume."
+                                : "Screen is not playing.");
         return;
     }
 
@@ -997,7 +1511,11 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
 
     switch (action) {
     case 0:
-        stop_screen_playback(ctx, &ctx->registry.screens[scr_idx]);
+        if (!sess && !source) {
+            send_err(sender, "Screen is not playing.");
+            return;
+        }
+        stop_screen_playback(ctx, screen);
         sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Stopped");
         break;
     case 1:
@@ -1032,12 +1550,23 @@ static void cmd_status(struct video_ctx *ctx, void *sender, int argc, const char
         return;
     }
 
-    struct screen_entry *screen = &ctx->registry.screens[scr_idx];
+    struct screen_entry *screen = ctx->registry.screens[scr_idx];
+    struct mps_source *source = mps_source_find(
+        &ctx->image_engine, screen->runtime_id);
     char buf[256];
 
     struct video_session *sess =
         video_engine_find(&ctx->engine, screen->runtime_id);
     if (!sess) {
+        if (source) {
+            snprintf(buf, sizeof(buf), MC_AQUA "Screen '%s': " MC_WHITE
+                     "static image", screen->name);
+            sender_send_message(sender, buf);
+            snprintf(buf, sizeof(buf), MC_GRAY "Image: %s",
+                     source->image_name[0] ? source->image_name : "(unnamed)");
+            sender_send_message(sender, buf);
+            return;
+        }
         snprintf(buf, sizeof(buf), MC_GRAY "Screen '%s': idle", screen->name);
         sender_send_message(sender, buf);
         return;
@@ -1141,7 +1670,7 @@ static void cmd_watch(struct video_ctx *ctx, void *sender, void *player,
 
     if (!requested && online) {
         for (int i = 0; i < ctx->registry.count; i++) {
-            struct screen_entry *screen = &ctx->registry.screens[i];
+            struct screen_entry *screen = ctx->registry.screens[i];
             if (screen->tiles_initialized &&
                 mpv_membership_contains(&online->membership,
                                         screen->runtime_id)) {
@@ -1267,10 +1796,10 @@ static void debug_world_abi_dump(struct video_ctx *ctx, void *sender,
     struct screen_entry *map_screen = nullptr;
     int tile_index = -1;
     for (int s = 0; s < ctx->registry.count && !map_screen; s++) {
-        int count = screen_geom_tile_count(&ctx->registry.screens[s].geom);
+        int count = screen_geom_tile_count(&ctx->registry.screens[s]->geom);
         for (int tile = 0; tile < count; tile++) {
-            if (ctx->registry.screens[s].tiles[tile].map_id_valid) {
-                map_screen = &ctx->registry.screens[s];
+            if (ctx->registry.screens[s]->tiles[tile].map_id_valid) {
+                map_screen = ctx->registry.screens[s];
                 tile_index = tile;
                 break;
             }
@@ -1388,7 +1917,7 @@ static void cmd_debug(struct video_ctx *ctx, void *sender, void *player,
         send_err(sender, "Screen '%s' not found.", argv[2]);
         return;
     }
-    struct screen_entry *screen = &ctx->registry.screens[screen_index];
+    struct screen_entry *screen = ctx->registry.screens[screen_index];
 
     if (strcmp(argv[1], "maps") == 0) {
         char buffer[256];
@@ -1445,14 +1974,17 @@ static void cmd_debug(struct video_ctx *ctx, void *sender, void *player,
     int player_count = collect_public_viewers(
         ctx, screen, players, player_ids);
     if (strcmp(argv[1], "resend") == 0) {
-        int result = map_render_resend(&ctx->render, screen, players,
-                                       player_ids, player_count);
-        if (result == 0) {
-            sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY
-                                "Map resend requested for nearby public viewers.");
-        } else {
-            send_err(sender, "Map resend failed (%d).", result);
+        for (int i = 0; i < ctx->online_count; i++) {
+            if (mpv_membership_contains(&ctx->online_players[i].membership,
+                                        screen->runtime_id)) {
+                struct mps_source *source = mps_source_find(
+                    &ctx->image_engine, screen->runtime_id);
+                queue_resend(&ctx->online_players[i], screen->runtime_id,
+                             source ? source->attachment_id : 0);
+            }
         }
+        sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY
+                            "Map resend queued for nearby public viewers.");
         return;
     }
 
@@ -1514,6 +2046,8 @@ void video_handle_command(struct video_ctx *ctx,
         cmd_list(ctx, sender, argc, argv);
     } else if (strcmp(action, "create") == 0) {
         cmd_screen_create(ctx, sender, player, player_uuid, argc, argv);
+    } else if (strcmp(action, "materialize") == 0) {
+        cmd_screen_materialize(ctx, sender, player, player_uuid, argc, argv);
     } else if (strcmp(action, "delete") == 0) {
         cmd_screen_delete(ctx, sender, player, argc, argv);
     } else if (strcmp(action, "screens") == 0) {
@@ -1522,6 +2056,10 @@ void video_handle_command(struct video_ctx *ctx,
         cmd_screen_info(ctx, sender, argc, argv);
     } else if (strcmp(action, "play") == 0) {
         cmd_play(ctx, sender, player, argc, argv);
+    } else if (strcmp(action, "images") == 0) {
+        cmd_images(ctx, sender, argc, argv);
+    } else if (strcmp(action, "image") == 0) {
+        cmd_image(ctx, sender, player, argc, argv);
     } else if (strcmp(action, "pause") == 0) {
         cmd_pause_resume_stop(ctx, sender, argc, argv, 1);
     } else if (strcmp(action, "resume") == 0) {

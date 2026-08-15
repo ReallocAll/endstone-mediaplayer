@@ -27,7 +27,7 @@ on:
         default: false
         type: boolean
       rel_tag:
-        description: 'Release tag (e.g. 2.2.1)'
+        description: 'Release tag (e.g. 2.3.0)'
         required: false
         default: ''
         type: string
@@ -61,15 +61,29 @@ jobs:
           INPUT_TAG: ${{ inputs.rel_tag }}
           INPUT_TITLE: ${{ inputs.rel_title }}
           INPUT_DESC: ${{ inputs.rel_desc }}
+          INPUT_RELEASE: ${{ inputs.release }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             tag="${GITHUB_REF_NAME#v}"
+            if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::push tag must be vX.Y.Z (received '$GITHUB_REF_NAME')"
+              exit 1
+            fi
             title="v$tag"
             current_ref="$GITHUB_SHA"
             previous_tag="$(git describe --tags --abbrev=0 "$GITHUB_SHA^" 2>/dev/null || true)"
           else
-            tag="$INPUT_TAG"
-            title="${INPUT_TITLE:-v$INPUT_TAG}"
+            tag="${INPUT_TAG#v}"
+            if [ -z "$tag" ]; then
+              if [ "$INPUT_RELEASE" = "true" ]; then
+                echo "::error::rel_tag is required when release creation is enabled"
+                exit 1
+              fi
+            elif ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::rel_tag must be x.y.z, with an optional leading v (received '$INPUT_TAG')"
+              exit 1
+            fi
+            title="${INPUT_TITLE:-v$tag}"
             current_ref="$GITHUB_SHA"
             previous_tag="$(git describe --tags --abbrev=0 "$GITHUB_SHA" 2>/dev/null || true)"
             if [ -n "$INPUT_DESC" ]; then
@@ -78,15 +92,20 @@ jobs:
           fi
 
           if [ -z "${desc:-}" ]; then
-            if [ -n "$previous_tag" ]; then
-              range="$previous_tag..$current_ref"
-              heading="## Changes from $previous_tag to v$tag"
+            notes_path="docs/releases/v$tag.md"
+            if [ -f "$notes_path" ]; then
+              desc="$(cat "$notes_path")"
             else
-              range="$current_ref"
-              heading="## Changes in v$tag"
+              if [ -n "$previous_tag" ]; then
+                range="$previous_tag..$current_ref"
+                heading="## Changes from $previous_tag to v$tag"
+              else
+                range="$current_ref"
+                heading="## Changes in v$tag"
+              fi
+              changes="$(git log --pretty=format:'- %s (`%h`)' "$range")"
+              desc="$(printf '%s\n\n%s' "$heading" "$changes")"
             fi
-            changes="$(git log --pretty=format:'- %s (`%h`)' "$range")"
-            desc="$(printf '%s\n\n%s' "$heading" "$changes")"
           fi
 
           echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
@@ -179,6 +198,7 @@ jobs:
           cmake_args=(
             -G Ninja
             -DCMAKE_C_COMPILER=clang-20
+            -DCMAKE_CXX_COMPILER=clang++-20
             "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
             -S .
             -B build
@@ -198,6 +218,7 @@ jobs:
           cmake_args=(
             -G Ninja
             -DCMAKE_C_COMPILER=clang-20
+            -DCMAKE_CXX_COMPILER=clang++-20
             "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
             -DENABLE_MPV_DEBUG_COMMANDS=ON
             -S .
@@ -217,12 +238,63 @@ jobs:
           path: build/endstone_mediaplayer.so
           retention-days: 1
 
+  build-python:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install release checks
+        run: python -m pip install --disable-pip-version-check ruff
+
+      - name: Run package tests
+        run: python tests/test_package_release.py
+
+      - name: Compile release Python files
+        run: python -m compileall -q python/endstone_mediaplayer examples tools/package_release.py
+
+      - name: Run Ruff
+        run: ruff check --select E4,E7,E9,F python/endstone_mediaplayer examples/basic_screen.py tools/package_release.py
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          python -m pip wheel --no-deps --wheel-dir wheel python/
+          test "$(find wheel -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test -f "wheel/endstone_mediaplayer-0.1.0-py3-none-any.whl"
+
+      - name: Test wheel import
+        shell: bash
+        run: |
+          python -m pip install --no-deps --target wheel-smoke \
+            wheel/endstone_mediaplayer-0.1.0-py3-none-any.whl
+          PYTHONPATH=wheel-smoke python -c \
+            'import endstone_mediaplayer; assert callable(endstone_mediaplayer.mediaplayer)'
+
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-python
+          path: wheel/endstone_mediaplayer-0.1.0-py3-none-any.whl
+          retention-days: 1
+
   release:
-    needs: [prepare, build-win, build-linux]
+    needs: [prepare, build-win, build-linux, build-python]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - name: Download release files
         uses: actions/download-artifact@v7
         with:
@@ -231,27 +303,36 @@ jobs:
           merge-multiple: true
 
       - name: Package release
-        env:
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag_name }}
         run: |
-          zip -j "endstone_mediaplayer_v$RELEASE_TAG.zip" release/*
+          python tools/package_release.py \
+            --windows-dll release/endstone_mediaplayer.dll \
+            --windows-pdb release/endstone_mediaplayer.pdb \
+            --linux-so release/endstone_mediaplayer.so \
+            --wheel release/endstone_mediaplayer-0.1.0-py3-none-any.whl \
+            --source-root . \
+            --output-dir dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         if: github.event_name == 'push' || inputs.artifact
         with:
-          name: endstone_mediaplayer
+          name: endstone_mediaplayer-release
           path: |
-            release/endstone_mediaplayer.dll
-            release/endstone_mediaplayer.pdb
-            release/endstone_mediaplayer.so
+            dist/endstone_mediaplayer-windows-x64.zip
+            dist/endstone_mediaplayer-linux-x64.tar.gz
+            dist/endstone_mediaplayer-sdk.zip
+          retention-days: 1
 
       - name: Create release
-        uses: softprops/action-gh-release@v3.0.1
+        uses: softprops/action-gh-release@v3.0.2
         if: github.event_name == 'push' || inputs.release
         with:
           tag_name: v${{ needs.prepare.outputs.tag_name }}
           name: ${{ needs.prepare.outputs.title }}
           prerelease: ${{ github.event_name == 'push' && false || inputs.pre_release }}
           body: ${{ needs.prepare.outputs.desc_body }}
-          files: endstone_mediaplayer_v${{ needs.prepare.outputs.tag_name }}.zip
+          fail_on_unmatched_files: true
+          files: |
+            dist/endstone_mediaplayer-windows-x64.zip
+            dist/endstone_mediaplayer-linux-x64.tar.gz
+            dist/endstone_mediaplayer-sdk.zip

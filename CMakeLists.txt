@@ -2,13 +2,38 @@ cmake_minimum_required(VERSION 3.21)
 
 project(endstone_mediaplayer LANGUAGES C)
 
-set(MP_VERSION "2.2.1" CACHE STRING "MediaPlayer plugin version")
+# Keep the C and C++ consumer targets on the same clang-cl ABI on Windows.
+# Production sources remain C; C++ is enabled only for the SDK compile check.
+if(WIN32)
+    set(CMAKE_CXX_COMPILER "${CMAKE_C_COMPILER}" CACHE FILEPATH
+        "C++ compiler (must be clang-cl on Windows)" FORCE)
+endif()
+enable_language(CXX)
+
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "MediaPlayer SDK consumers require Clang C++")
+endif()
+if(WIN32 AND NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    message(FATAL_ERROR "Windows SDK consumers require clang-cl")
+endif()
+
+set(MP_VERSION "2.3.0" CACHE STRING "MediaPlayer plugin version")
 option(ENABLE_MPV_DEBUG_COMMANDS "Expose /mpv debug diagnostics" OFF)
 
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# CMake versions whose Clang-cl module predates C23 report only C17 even
+# though the selected Clang supports the dialect.  Supply the known flag so
+# C23 remains the actual production language mode when CXX is enabled.
+if(WIN32 AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_C23_COMPILE_FEATURES c_std_23)
+    set(CMAKE_C_STANDARD_LATEST 23)
+    set(CMAKE_C23_STANDARD_COMPILE_OPTION "/clang:-std=c23")
+    set(CMAKE_C23_EXTENSION_COMPILE_OPTION "/clang:-std=gnu23")
+endif()
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR
    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
@@ -33,6 +58,7 @@ endif()
 
 set(MP_SOURCES
     src/plugin.c
+    src/api_provider.c
     src/endstone_api.c
     src/music/music_catalog.c
     src/music/music_cache.c
@@ -44,6 +70,8 @@ set(MP_SOURCES
     src/screen/screen_geometry.c
     src/screen/screen_registry.c
     src/screen/screen_persistence.c
+    src/screen/surface.c
+    src/screen/presenter.c
     src/video/video_format.c
     src/video/video_session.c
     src/video/video_catalog.c
@@ -55,6 +83,9 @@ set(MP_SOURCES
     src/bedrock/world_write_abi.c
     src/map/map_abi.c
     src/map/map_render.c
+    src/image/mps_format.c
+    src/image/mps_catalog.c
+    src/image/mps_source.c
     third_party/cppcompat/src/common/alloc.c
     third_party/cjson/cJSON.c
     third_party/miniz/miniz.c
@@ -83,6 +114,7 @@ endif()
 add_library(endstone_mediaplayer SHARED ${MP_SOURCES})
 target_compile_definitions(endstone_mediaplayer PRIVATE
     MP_VERSION="${MP_VERSION}"
+    MP_PROVIDER_BUILD=1
     ${MP_MINIZ_DEFINES})
 if(ENABLE_MPV_DEBUG_COMMANDS)
     target_compile_definitions(endstone_mediaplayer PRIVATE
@@ -191,9 +223,12 @@ add_test(NAME nbs_parser COMMAND test_nbs_parser)
 
 # Video screen system tests
 add_executable(test_video tests/test_video.c
+    src/api_provider.c
     src/screen/screen_geometry.c
     src/screen/screen_registry.c
     src/screen/screen_persistence.c
+    src/screen/surface.c
+    src/screen/presenter.c
     src/video/video_format.c
     src/video/video_session.c
     src/video/video_policy.c
@@ -207,6 +242,9 @@ add_executable(test_video tests/test_video.c
     src/bedrock/world_write_abi.c
     src/map/map_abi.c
     src/map/map_render.c
+    src/image/mps_format.c
+    src/image/mps_catalog.c
+    src/image/mps_source.c
     third_party/cjson/cJSON.c
     third_party/miniz/miniz.c)
 target_sources(test_video PRIVATE
@@ -263,9 +301,153 @@ endif()
 
 add_test(NAME video_system COMMAND test_video)
 
+# UTF-8 file-opening helper tests
+add_executable(test_fopen_utf8 tests/test_fopen_utf8.c
+    src/endstone_api.c
+    third_party/cppcompat/src/common/alloc.c)
+target_include_directories(test_fopen_utf8 PRIVATE
+    include
+    third_party/cppcompat/include
+    third_party/cppcompat/src)
+target_compile_definitions(test_fopen_utf8 PRIVATE _CRT_SECURE_NO_WARNINGS)
+set_target_properties(test_fopen_utf8 PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+if(WIN32)
+    target_sources(test_fopen_utf8 PRIVATE
+        third_party/cppcompat/src/msvc/string.c)
+    set_property(TARGET test_fopen_utf8 PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_sources(test_fopen_utf8 PRIVATE
+        third_party/cppcompat/src/libcxx/string.c)
+endif()
+add_test(NAME fopen_utf8 COMMAND test_fopen_utf8)
+
+# Public SDK consumers.  They intentionally do not link the provider target;
+# the provider is discovered only after loading the shared module at runtime.
+add_library(mock_mediaplayer_provider SHARED
+    tests/mock_mediaplayer_provider.c)
+target_include_directories(mock_mediaplayer_provider PRIVATE include)
+target_compile_definitions(mock_mediaplayer_provider PRIVATE MP_PROVIDER_BUILD=1)
+set_target_properties(mock_mediaplayer_provider PROPERTIES
+    PREFIX "endstone_"
+    OUTPUT_NAME "mediaplayer"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/mock_provider"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/mock_provider"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/mock_provider")
+if(WIN32)
+    set_property(TARGET mock_mediaplayer_provider PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+else()
+    target_link_libraries(mock_mediaplayer_provider PRIVATE dl)
+endif()
+
+add_executable(test_sdk_c tests/test_sdk_c.c)
+target_include_directories(test_sdk_c PRIVATE include)
+set_target_properties(test_sdk_c PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+if(WIN32)
+    set_property(TARGET test_sdk_c PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_link_libraries(test_sdk_c PRIVATE dl)
+endif()
+add_dependencies(test_sdk_c endstone_mediaplayer)
+add_test(NAME sdk_c COMMAND test_sdk_c)
+
+add_executable(test_sdk_cpp tests/test_sdk_cpp.cpp)
+target_include_directories(test_sdk_cpp PRIVATE include)
+set_target_properties(test_sdk_cpp PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+if(WIN32)
+    set_property(TARGET test_sdk_cpp PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_link_libraries(test_sdk_cpp PRIVATE dl)
+endif()
+add_dependencies(test_sdk_cpp mock_mediaplayer_provider)
+add_test(NAME sdk_cpp COMMAND test_sdk_cpp)
+
+# Sparse surface transaction tests
+add_executable(test_surface tests/test_surface.c
+    src/screen/surface.c
+    third_party/miniz/miniz.c)
+target_include_directories(test_surface PRIVATE
+    include
+    third_party/miniz)
+target_compile_definitions(test_surface PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    ${MP_MINIZ_DEFINES})
+set_target_properties(test_surface PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+if(WIN32)
+    set_property(TARGET test_surface PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_link_libraries(test_surface PRIVATE m)
+endif()
+add_test(NAME surface COMMAND test_surface)
+
+# Sparse surface presenter scheduling tests
+add_executable(test_presenter tests/test_presenter.c
+    src/screen/presenter.c
+    src/screen/surface.c
+    src/screen/screen_geometry.c
+    third_party/miniz/miniz.c)
+target_include_directories(test_presenter PRIVATE
+    include
+    third_party/miniz)
+target_compile_definitions(test_presenter PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    ${MP_MINIZ_DEFINES})
+set_target_properties(test_presenter PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+if(WIN32)
+    set_property(TARGET test_presenter PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_link_libraries(test_presenter PRIVATE m)
+endif()
+add_test(NAME presenter COMMAND test_presenter)
+
+# Standalone MPS1 tiled image container tests
+add_executable(test_mps tests/test_mps.c
+    src/image/mps_format.c
+    third_party/miniz/miniz.c)
+target_include_directories(test_mps PRIVATE
+    include
+    third_party/miniz)
+target_compile_definitions(test_mps PRIVATE
+    _CRT_SECURE_NO_WARNINGS
+    ${MP_MINIZ_DEFINES})
+set_target_properties(test_mps PROPERTIES
+    C_STANDARD 23
+    C_STANDARD_REQUIRED ON)
+if(WIN32)
+    set_property(TARGET test_mps PROPERTY MSVC_RUNTIME_LIBRARY
+        "MultiThreadedDLL")
+else()
+    target_link_libraries(test_mps PRIVATE m)
+endif()
+add_test(NAME mps COMMAND test_mps)
+
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME python_binding
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python_binding.py"
+                "${CMAKE_CURRENT_BINARY_DIR}/mock_provider")
+    set_tests_properties(python_binding PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
     add_test(NAME video_converter
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_convert_video.py")
+    add_test(NAME image_converter
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_convert_image.py")
 endif()

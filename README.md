@@ -14,6 +14,7 @@ An [Endstone](https://github.com/EndstoneMC/endstone) plugin that plays NBS musi
 - **Multiple Display Modes**: BossBar, popup, tip, or hidden
 - **Command Control**: `/mpm` command with tab completion
 - **Public Map Screens**: automatically show map video to nearby players
+- **Reusable API**: a single-header C23 SDK and installable Python binding
 
 ## Installation
 
@@ -62,20 +63,37 @@ Screen-control `/mpv` commands require operator status. Every player can use `/m
 | `/mpv screens` | List registered public screens |
 | `/mpv list [filter]` | List converted `.mcv` videos with their play indices |
 | `/mpv create <name>` | Discover the backing wall at the player and create a screen |
+| `/mpv materialize <name>` | Materialize an API-created logical screen at an OP player's backing wall |
 | `/mpv delete <name>` | Delete a plugin-managed screen and its remaining managed frames |
 | `/mpv info <name>` | Show screen geometry and public access information |
 | `/mpv play <screen> <index> [loop]` | Play a video by its `/mpv list` index; its tile grid must match the screen's exactly |
+| `/mpv images [filter]` | List valid MPS1 static images with their indices |
+| `/mpv image <screen> <image-index>` | Display an MPS1 static image; its tile grid must match the screen's exactly |
 | `/mpv pause <screen>` | Pause playback |
 | `/mpv resume <screen>` | Resume playback |
 | `/mpv stop <screen>` | Stop playback |
 | `/mpv status <screen>` | Show playback status |
 | `/mpv watch [on\|off]` | Show or change whether this player receives public screen video and music |
 
-Screens use a fixed public viewer model. Any online player—OP or not—with a valid snapshot in the same dimension and no more than 16 blocks from the geometric screen center receives video and screen music automatically, unless they disable both with `/mpv watch off`.
+Screens use a fixed public viewer model. Any online player—OP or not—with a valid snapshot in the same dimension and within 16 blocks of the screen's axis-aligned tile bounds receives video and screen music automatically, unless they disable both with `/mpv watch off`.
 
 When a video has an exactly matching `.nbs` base name, the plugin plays it as the screen soundtrack. The video is the master clock: pausing or stopping affects both, every video loop restarts the NBS, and music remaining after the video ends is stopped. A missing or invalid matching NBS does not prevent silent video playback.
 
-To create a screen, stand in the air immediately in front of a rectangular solid backing wall no larger than 7×4 and run `/mpv create <name>`. The plugin discovers the wall and facing, validates every tile, places empty item frames, and gives the creator labeled maps. Install the maps manually from left to right and top to bottom using their row/column labels.
+To create a screen, stand in the air immediately in front of a rectangular solid backing wall no larger than 7×4 and run `/mpv create <name>`. The player's feet-level air cell defines the bottom screen row; backing and floor blocks below that Y are ignored. Every actual display cell must be air. The plugin discovers the wall from that Y upward, validates every tile, places empty item frames, and gives the creator labeled maps. Install the maps manually from left to right and top to bottom using their row/column labels.
+
+An API-created logical screen can be materialized in place by an OP player with
+`/mpv materialize <name>`. The command requires the discovered backing to have
+exactly the logical screen's tile dimensions; it installs maps left-to-right,
+top-to-bottom using the same row/column labels as `create`. The screen entry,
+runtime identity, surface, pixels, and existing API handle remain valid while
+its backend becomes plugin-managed. The player's feet Y likewise defines the
+materialized screen's bottom row.
+
+### Logical screens, physical maps, and the API
+
+The public C ABI and Python binding can create logical screens from 1×1 through 1024×1024 tiles. A logical screen is a sparse surface for pixel updates; it does not materialize a wall or a million physical maps until an OP uses `/mpv materialize`. The world-facing `/mpv create` and `materialize` commands remain bounded by a 7×4 backing wall and item-frame map screen, and MCV1 remains compatible with this physical path with a fixed maximum 7×4 tile grid. Treat the logical dimensions and physical map dimensions as separate limits. Materialization is an in-place upgrade, so the API screen handle remains valid.
+
+The API is declared in the single public C23 header [`include/endstone_mediaplayer_api.h`](include/endstone_mediaplayer_api.h). Its reference is [`docs/sdk.md`](docs/sdk.md). It can be used without an import library. The reusable Python binding is documented in [`python/README.md`](python/README.md); its provider must already be loaded by Endstone. Reacquire API tables and handles after a MediaPlayer enable/reload cycle.
 
 ### Network compression and screen size
 
@@ -98,9 +116,22 @@ MCV is the plugin's video container (format version 1, extension `.mcv`). A file
 
 The converter starts one FFmpeg decoding process, requests raw `rgba` frames, and streams each frame directly into a same-directory temporary container, compressing with zlib level 6 by default (`--level` adjusts it, `--no-compress` disables it). Memory holds roughly one raw frame plus the frame index it buffers in RAM (24 bytes per frame). After FFmpeg exits successfully, the converter appends the index, finalizes and fsyncs the CRC-carrying header, then atomically installs the result with `os.replace`. Errors and interruption remove the temporary file and preserve an existing destination.
 
+### Static images (MPS1)
+
+Convert one image into the tiled MPS1 container with Pillow installed:
+
+```shell
+python tools/convert_image.py INPUT OUTPUT --tiles-width W --tiles-height H --mode fit
+```
+
+`--mode fit` is the default aspect-fit conversion mode. MPS1 supports logical tile dimensions up to 1024×1024, but `/mpv image` still requires an exact match with the target screen. The converter samples one output tile at a time; playback validates the header and reads tiles lazily, retaining only bounded index/cache and tile state. Starting `/mpv image` replaces any active video or soundtrack on that screen; starting `/mpv play` likewise replaces an active static image. Static images do not support pause/resume, but `/mpv stop` does stop them.
+
+Large logical screens and frequent updates can still consume substantial memory and bandwidth. Sparse surfaces bound resident and pending tile state, but network traffic depends on changed tiles, frame rate, compression, and the number of viewers; physical map playback also scales upload traffic with viewers.
+
 ## Building
 
-**Requirements:** CMake 3.21+, Ninja, and Clang (`clang-cl` on Windows, `clang` on Linux, plus LLD on Linux).
+**Requirements:** CMake 3.21+, Ninja, and Clang (`clang-cl` on Windows;
+`clang` and `clang++` on Linux, plus LLD).
 
 Windows:
 
@@ -112,7 +143,7 @@ cmake --build build
 Linux:
 
 ```bash
-cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build
+cmake -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=RelWithDebInfo -B build
 cmake --build build
 ```
 

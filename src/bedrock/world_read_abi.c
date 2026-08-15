@@ -35,23 +35,23 @@ bool mp_world_c_type_is_support_candidate(const char *type)
 
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
 
-_Static_assert(sizeof(struct es_location) == ES_LOCATION_SIZE,
-               "measured Location size mismatch");
-_Static_assert(_Alignof(struct es_location) == ES_LOCATION_ALIGN,
-               "measured Location alignment mismatch");
-_Static_assert(offsetof(struct es_location, dimension) ==
-                   ES_LOCATION_OFF_DIMENSION,
-               "measured Location dimension offset mismatch");
-_Static_assert(offsetof(struct es_location, x) == ES_LOCATION_OFF_X,
-               "measured Location x offset mismatch");
-_Static_assert(offsetof(struct es_location, y) == ES_LOCATION_OFF_Y,
-               "measured Location y offset mismatch");
-_Static_assert(offsetof(struct es_location, z) == ES_LOCATION_OFF_Z,
-               "measured Location z offset mismatch");
-_Static_assert(offsetof(struct es_location, pitch) == ES_LOCATION_OFF_PITCH,
-               "measured Location pitch offset mismatch");
-_Static_assert(offsetof(struct es_location, yaw) == ES_LOCATION_OFF_YAW,
-               "measured Location yaw offset mismatch");
+static_assert(sizeof(struct es_location) == ES_LOCATION_SIZE,
+              "measured Location size mismatch");
+static_assert(_Alignof(struct es_location) == ES_LOCATION_ALIGN,
+              "measured Location alignment mismatch");
+static_assert(offsetof(struct es_location, dimension) ==
+                  ES_LOCATION_OFF_DIMENSION,
+              "measured Location dimension offset mismatch");
+static_assert(offsetof(struct es_location, x) == ES_LOCATION_OFF_X,
+              "measured Location x offset mismatch");
+static_assert(offsetof(struct es_location, y) == ES_LOCATION_OFF_Y,
+              "measured Location y offset mismatch");
+static_assert(offsetof(struct es_location, z) == ES_LOCATION_OFF_Z,
+              "measured Location z offset mismatch");
+static_assert(offsetof(struct es_location, pitch) == ES_LOCATION_OFF_PITCH,
+              "measured Location pitch offset mismatch");
+static_assert(offsetof(struct es_location, yaw) == ES_LOCATION_OFF_YAW,
+              "measured Location yaw offset mismatch");
 
 struct world_read_context {
     struct es_location location;
@@ -83,11 +83,9 @@ static bool read_string_return(void *object, size_t slot,
 
     _Alignas(void *) unsigned char result[ES_STRING_SIZE] = {0};
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*string_fn)(void *, void *);
-    ((string_fn)(*vtable_address)[slot])(result, object);
+    ((void (*)(void *, void *))(*vtable_address)[slot])(result, object);
 #else
-    typedef void *(*string_fn)(void *, void *);
-    ((string_fn)(*vtable_address)[slot])(object, result);
+    ((void *(*)(void *, void *))(*vtable_address)[slot])(object, result);
 #endif
 
     const char *data = cpp_string_str(result);
@@ -130,19 +128,19 @@ static bool get_player_world(void *player, const char *expected_dimension,
     }
 
 #if defined(ES_PLATFORM_LINUX)
-    typedef struct es_location (*get_location_fn)(void *);
     world->location =
-        ((get_location_fn)(*player_vtable)[ES_PLAYER_SLOT_GET_LOCATION])(
+        ((struct es_location (*)(void *))
+            (*player_vtable)[ES_PLAYER_SLOT_GET_LOCATION])(
             player);
 #else
-    typedef void *(*get_location_fn)(void *, struct es_location *);
-    ((get_location_fn)(*player_vtable)[ES_PLAYER_SLOT_GET_LOCATION])(
+    ((void *(*)(void *, struct es_location *))
+        (*player_vtable)[ES_PLAYER_SLOT_GET_LOCATION])(
         player, &world->location);
 #endif
 
-    typedef void *(*get_dimension_fn)(void *);
     world->dimension =
-        ((get_dimension_fn)(*player_vtable)[ES_PLAYER_SLOT_GET_DIMENSION])(
+        ((void *(*)(void *))
+            (*player_vtable)[ES_PLAYER_SLOT_GET_DIMENSION])(
             player);
     if (!world->dimension || world->location.dimension != world->dimension) {
         set_detail(detail, detail_size,
@@ -250,13 +248,12 @@ static enum mp_world_result probe_block_in_world(
 
     void *block = nullptr;
 #if defined(ES_PLATFORM_LINUX)
-    typedef void (*get_block_fn)(void **, void *, int, int, int);
-    ((get_block_fn)(*dimension_vtable)[
+    ((void (*)(void **, void *, int, int, int))(*dimension_vtable)[
         ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
             &block, world->dimension, position.x, position.y, position.z);
 #else
-    typedef void *(*get_block_fn)(void *, void **, int, int, int);
-    ((get_block_fn)(*dimension_vtable)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
+    ((void *(*)(void *, void **, int, int, int))
+        (*dimension_vtable)[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ])(
         world->dimension, &block, position.x, position.y, position.z);
 #endif
     if (!block) {
@@ -311,11 +308,10 @@ destroy_block:
     if (block_vtable && *block_vtable &&
         (*block_vtable)[ES_BLOCK_SLOT_DELETE]) {
 #if defined(ES_PLATFORM_LINUX)
-        typedef void (*delete_fn)(void *);
-        ((delete_fn)(*block_vtable)[ES_BLOCK_SLOT_DELETE])(block);
+        ((void (*)(void *))(*block_vtable)[ES_BLOCK_SLOT_DELETE])(block);
 #else
-        typedef void (*delete_fn)(void *, unsigned int);
-        ((delete_fn)(*block_vtable)[ES_BLOCK_SLOT_DELETE])(block, 1);
+        ((void (*)(void *, unsigned int))
+            (*block_vtable)[ES_BLOCK_SLOT_DELETE])(block, 1);
 #endif
         if (trace) trace->block_destroy_count++;
     }

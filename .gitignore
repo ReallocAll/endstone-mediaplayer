@@ -1,10 +1,17 @@
 build/
+build-*/
 ref/
 .cache/
 .claude/
 .vscode/
 MEMORY.md
+__pycache__/
+*.egg-info/
+*.obj
 *.ilk
 *.pdb
 *.exp
 *.lib
+screens.mapids.*.bin
+tools/*.mcv
+tools/*.mp4

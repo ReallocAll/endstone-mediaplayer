@@ -13,12 +13,28 @@ extern void *g_plugin;
 
 FILE *fopen_utf8(const char *path, const char *mode)
 {
+    if (path == nullptr || mode == nullptr) return nullptr;
 #if ES_PLATFORM_WINDOWS
     wchar_t wide_path[ENDSTONE_MEDIAPLAYER_PATH_MAX];
     wchar_t wide_mode[8];
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wide_path,
-                        ENDSTONE_MEDIAPLAYER_PATH_MAX);
-    MultiByteToWideChar(CP_UTF8, 0, mode, -1, wide_mode, 8);
+
+    int path_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                          path, -1, nullptr, 0);
+    int mode_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                          mode, -1, nullptr, 0);
+    if (path_length <= 0 || mode_length <= 0 ||
+        path_length > (int)(sizeof(wide_path) / sizeof(wide_path[0])) ||
+        mode_length > (int)(sizeof(wide_mode) / sizeof(wide_mode[0])))
+        return nullptr;
+
+    int converted_path = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             path, -1, wide_path,
+                                             path_length);
+    int converted_mode = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             mode, -1, wide_mode,
+                                             mode_length);
+    if (converted_path != path_length || converted_mode != mode_length)
+        return nullptr;
     return _wfopen(wide_path, wide_mode);
 #else
     return fopen(path, mode);
@@ -91,10 +107,10 @@ void *boss_bar_create(void *player, const char *title)
     void *server;
     void *boss;
     _Alignas(8) unsigned char string[ES_STRING_SIZE];
-    _Alignas(8) void *result = NULL;
-    if (!g_plugin || !player) return NULL;
+    _Alignas(8) void *result = nullptr;
+    if (!g_plugin || !player) return nullptr;
     server = PLUGIN_SERVER(g_plugin);
-    if (!server) return NULL;
+    if (!server) return nullptr;
     cpp_string_construct(string, title);
 #if ES_PLATFORM_LINUX
     ((void (*)(void *, void *, void *, int, int))

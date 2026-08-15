@@ -99,7 +99,12 @@ int video_session_start(struct video_session *s, const char *video_path,
     s->loop_current = 1;
     s->screen_runtime_id = screen_runtime_id;
 
-    return video_session_load_frame(s, 0);
+    int first_frame_error = video_session_load_frame(s, 0);
+    if (first_frame_error != 0) {
+        video_session_stop(s);
+        return first_frame_error;
+    }
+    return 0;
 }
 
 void video_session_stop(struct video_session *s)

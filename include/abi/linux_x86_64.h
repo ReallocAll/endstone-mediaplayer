@@ -45,7 +45,7 @@
 #define ES_PM_SLOT_REGISTER_EVENT 16
 #define ES_PRIORITY_NORMAL 2
 #define ES_COMMAND_SIZE 136
-#define ES_PERMISSION_SIZE 1 /* empty compatibility vector; no element is materialized */
+#define ES_PERMISSION_SIZE 1 // empty compatibility vector; no element is materialized
 #define ES_COMMAND_OFF_NAME 8
 #define ES_COMMAND_OFF_DESC 32
 #define ES_COMMAND_OFF_ALIASES 56
@@ -74,7 +74,7 @@
 #define ES_BOSSBAR_SLOT_ADD_PLAYER 15
 #define ES_BAR_COLOR_GREEN 3
 #define ES_BAR_STYLE_SOLID 0
-/* Measured PlayerEvent reference_wrapper member offset. */
+// Measured PlayerEvent reference_wrapper member offset.
 #define ES_PLAYER_EVENT_OFF_PLAYER 16
 #define ES_API_VERSION "0.11"
 

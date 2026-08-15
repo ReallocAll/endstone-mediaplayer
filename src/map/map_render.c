@@ -34,7 +34,7 @@ struct tile_renderer {
     int tile_col;
     int tile_row;
     char screen_name[SCREEN_NAME_MAX];
-    const uint8_t *frame_ptr;
+    const uint8_t *tile_pixels;
     int pixel_width;
     int pixel_height;
     enum map_test_pattern pattern;
@@ -51,11 +51,11 @@ struct tile_renderer {
     uint32_t last_last_pixel;
 };
 
-_Static_assert(offsetof(struct tile_renderer, is_contextual) ==
-                   ES_MAPRENDERER_OFF_IS_CONTEXTUAL,
-               "MapRenderer contextual flag offset mismatch");
-_Static_assert(offsetof(struct tile_renderer, tile_col) == ES_MAPRENDERER_SIZE,
-               "MapRenderer base size mismatch");
+static_assert(offsetof(struct tile_renderer, is_contextual) ==
+                  ES_MAPRENDERER_OFF_IS_CONTEXTUAL,
+              "MapRenderer contextual flag offset mismatch");
+static_assert(offsetof(struct tile_renderer, tile_col) == ES_MAPRENDERER_SIZE,
+              "MapRenderer base size mismatch");
 
 struct ref_count_block {
     void **vtable;
@@ -68,12 +68,12 @@ struct ref_count_block {
 #endif
 };
 
-_Static_assert(sizeof(struct ref_count_block) == ES_REFCOUNT_SIZE,
-               "shared_ptr control block size mismatch");
-_Static_assert(offsetof(struct ref_count_block, uses) == ES_REFCOUNT_OFF_USES,
-               "shared_ptr strong count offset mismatch");
-_Static_assert(offsetof(struct ref_count_block, weaks) == ES_REFCOUNT_OFF_WEAKS,
-               "shared_ptr weak count offset mismatch");
+static_assert(sizeof(struct ref_count_block) == ES_REFCOUNT_SIZE,
+              "shared_ptr control block size mismatch");
+static_assert(offsetof(struct ref_count_block, uses) == ES_REFCOUNT_OFF_USES,
+              "shared_ptr strong count offset mismatch");
+static_assert(offsetof(struct ref_count_block, weaks) == ES_REFCOUNT_OFF_WEAKS,
+              "shared_ptr weak count offset mismatch");
 
 struct renderer_alloc {
     struct tile_renderer renderer;
@@ -217,18 +217,8 @@ static void renderer_render(void *self, void *map_view, void *canvas,
                     renderer->pixel_width, renderer->pixel_height);
             }
         }
-    } else if (renderer->frame_ptr) {
-        int start_x = renderer->tile_col * SCREEN_TILE_SIZE;
-        int start_y = renderer->tile_row * SCREEN_TILE_SIZE;
-        const uint32_t *source = (const uint32_t *)renderer->frame_ptr;
-        for (int row = 0; row < SCREEN_TILE_SIZE; row++) {
-            const uint32_t *source_row =
-                source + (size_t)(start_y + row) * renderer->pixel_width +
-                start_x;
-            uint32_t *destination_row =
-                destination + (size_t)row * SCREEN_TILE_SIZE;
-            memcpy(destination_row, source_row, SCREEN_TILE_SIZE * sizeof(uint32_t));
-        }
+    } else if (renderer->tile_pixels) {
+        memcpy(destination, renderer->tile_pixels, SURFACE_TILE_BYTES);
     }
 
     renderer->last_first_pixel = destination[0];
@@ -247,7 +237,7 @@ static void renderer_render(void *self, void *map_view, void *canvas,
         renderer->last_write_verified =
             renderer->last_first_pixel == expected_first &&
             renderer->last_last_pixel == expected_last;
-    } else if (renderer->frame_ptr) {
+    } else if (renderer->tile_pixels) {
         renderer->last_write_verified = true;
     }
 
@@ -366,6 +356,8 @@ static void send_tiles(const struct screen_entry *screen,
                        void **players, const char **player_ids,
                        int player_count, const bool *tile_dirty)
 {
+    if (!screen || !screen->tiles)
+        return;
     int tile_count = screen_geom_tile_count(&screen->geom);
     for (int p = 0; p < player_count; p++) {
         void *player = players[p];
@@ -402,6 +394,9 @@ enum map_render_error map_render_init_screen(struct map_render_ctx *ctx,
     if (!player || screen->tiles_initialized) {
         return MAP_RENDER_ERR_INIT;
     }
+
+    if (screen_entry_materialize_tiles(screen) != SCREEN_OK)
+        return MAP_RENDER_ERR_INIT;
 
     int tile_count = screen_geom_tile_count(&screen->geom);
     int pixel_width = screen_geom_pixel_width(&screen->geom);
@@ -459,12 +454,14 @@ void map_render_destroy_screen(struct map_render_ctx *ctx,
 {
     (void)ctx;
     int tile_count = screen_geom_tile_count(&screen->geom);
+    if (!screen->tiles)
+        return;
     for (int i = 0; i < tile_count; i++) {
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
         struct renderer_alloc *allocation = screen->tiles[i].renderer;
         if (allocation) {
             // Prevent callbacks from observing a session buffer after stop.
-            allocation->renderer.frame_ptr = nullptr;
+            allocation->renderer.tile_pixels = nullptr;
 #if defined(ES_PLATFORM_WINDOWS)
             struct es_msvc_shared_ptr owner = renderer_shared(allocation);
 #else
@@ -483,117 +480,116 @@ void map_render_destroy_screen(struct map_render_ctx *ctx,
         screen->tiles[i].renderer = nullptr;
         screen->tiles[i].valid = 0;
         screen->tiles[i].map_view = nullptr;
-        free(screen->tiles[i].last_sent);
-        screen->tiles[i].last_sent = nullptr;
-        screen->tiles[i].last_sent_valid = 0;
     }
     screen->tiles_initialized = 0;
 }
 
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
 
-#define MAP_TILE_BYTES ((size_t)SCREEN_TILE_SIZE * SCREEN_TILE_SIZE * 4)
-#define MAP_TILE_ROW_BYTES ((size_t)SCREEN_TILE_SIZE * 4)
+struct map_presenter_context {
+    struct screen_entry *screen;
+};
 
-// Updates the tile cache and returns whether the tile changed.
-static bool tile_changed(struct screen_tile_rt *tile, int tile_col,
-                         int tile_row, const uint8_t *frame_buf,
-                         int pixel_width)
+static bool presenter_send_tile(void *context,
+                                const struct presenter_tile *tile)
 {
-    if (!tile->last_sent) {
-        tile->last_sent = malloc(MAP_TILE_BYTES);
-        if (!tile->last_sent) {
-            return true; // Cannot track this tile: always send it.
-        }
-        tile->last_sent_valid = 0;
-    }
+    struct map_presenter_context *backend = context;
+    struct screen_entry *screen = backend->screen;
+    int index = screen_geom_tile_index(
+        &screen->geom, (int)tile->tile_x, (int)tile->tile_y);
+    if (index < 0 || !screen->tiles ||
+        (size_t)index >= screen->tiles_capacity)
+        return false;
+    if (!screen->tiles[index].valid || !screen->tiles[index].map_view)
+        return true;
+    struct renderer_alloc *allocation = screen->tiles[index].renderer;
+    if (!allocation || tile->bytes != SURFACE_TILE_BYTES)
+        return false;
 
-    bool changed = !tile->last_sent_valid;
-    for (int row = 0; row < SCREEN_TILE_SIZE; row++) {
-        size_t source_offset =
-            (((size_t)(tile_row * SCREEN_TILE_SIZE + row) * (size_t)pixel_width) +
-             (size_t)tile_col * SCREEN_TILE_SIZE) * 4;
-        const uint8_t *source = frame_buf + source_offset;
-        uint8_t *stored = tile->last_sent + (size_t)row * MAP_TILE_ROW_BYTES;
-        // Once a difference is found the remaining rows only need copying.
-        if (!changed && memcmp(stored, source, MAP_TILE_ROW_BYTES) != 0) {
-            changed = true;
-        }
-        if (changed) {
-            memcpy(stored, source, MAP_TILE_ROW_BYTES);
-        }
+    // Surface tile views are borrowed only for synchronous sendMap calls.
+    allocation->renderer.pattern = MAP_TEST_NONE;
+    allocation->renderer.tile_pixels = tile->pixels;
+    for (size_t i = 0; i < tile->viewer_count; i++) {
+        if (tile->viewers[i].player)
+            es_player_send_map(tile->viewers[i].player,
+                               screen->tiles[index].map_view);
     }
-    tile->last_sent_valid = 1;
-    return changed;
-}
-
-static void invalidate_sent_tiles(struct screen_entry *screen)
-{
-    int tile_count = screen_geom_tile_count(&screen->geom);
-    for (int i = 0; i < tile_count; i++) {
-        screen->tiles[i].last_sent_valid = 0;
-    }
+    allocation->renderer.tile_pixels = nullptr;
+    return true;
 }
 
 #endif
 
-void map_render_send_frame(struct map_render_ctx *ctx,
-                           struct screen_entry *screen,
-                           const uint8_t *frame_buf,
-                           void **players, const char **player_ids,
-                           int player_count)
+enum map_render_error map_render_submit_frame(
+    struct screen_entry *screen, const uint8_t *frame_buf,
+    size_t frame_bytes, enum surface_pixel_format format)
+{
+    if (!screen || !screen->surface || !frame_buf)
+        return MAP_RENDER_ERR_SURFACE;
+    struct surface_frame *frame = nullptr;
+    if (surface_frame_begin(screen->surface, &frame) != SURFACE_OK)
+        return MAP_RENDER_ERR_SURFACE;
+    enum surface_error error = surface_frame_update_region(
+        frame, 0, 0, (uint32_t)screen_geom_pixel_width(&screen->geom),
+        (uint32_t)screen_geom_pixel_height(&screen->geom), frame_buf,
+        frame_bytes,
+        (size_t)screen_geom_pixel_width(&screen->geom) * 4, format);
+    if (error == SURFACE_OK)
+        error = surface_frame_commit(frame);
+    if (error != SURFACE_OK) {
+        surface_frame_abort(frame);
+        return MAP_RENDER_ERR_SURFACE;
+    }
+    return MAP_RENDER_OK;
+}
+
+enum map_render_error map_render_present(
+    struct map_render_ctx *ctx, struct screen_entry *screen,
+    const struct presenter_viewer *viewers, size_t viewer_count,
+    size_t budget, struct presenter_stats *stats)
 {
     (void)ctx;
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
-    if (!frame_buf || !screen->tiles_initialized) {
-        return;
-    }
-    int pixel_width = screen_geom_pixel_width(&screen->geom);
-    int tile_count = screen_geom_tile_count(&screen->geom);
-    bool tile_dirty[SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {false};
-    bool any_dirty = false;
-
-    for (int i = 0; i < tile_count; i++) {
-        struct renderer_alloc *allocation = screen->tiles[i].renderer;
-        if (allocation) {
-            allocation->renderer.pattern = MAP_TEST_NONE;
-            allocation->renderer.frame_ptr = frame_buf;
-            allocation->renderer.pixel_width = pixel_width;
-            allocation->renderer.pixel_height =
-                screen_geom_pixel_height(&screen->geom);
-            tile_dirty[i] = tile_changed(&screen->tiles[i],
-                                         allocation->renderer.tile_col,
-                                         allocation->renderer.tile_row,
-                                         frame_buf, pixel_width);
-        } else {
-            tile_dirty[i] = true;
-        }
-        any_dirty = any_dirty || tile_dirty[i];
-    }
-    if (!any_dirty) {
-        return;
-    }
-    send_tiles(screen, players, player_ids, player_count, tile_dirty);
+    if (!screen || !screen->surface || !screen->tiles_initialized || !stats)
+        return MAP_RENDER_ERR_PRESENTER;
+    struct map_presenter_context backend_context = {.screen = screen};
+    struct presenter presenter;
+    struct presenter_backend backend = {
+        .context = &backend_context,
+        .send = presenter_send_tile,
+    };
+    if (presenter_init(&presenter, screen->surface, &screen->geom, 16.0,
+                       backend) != PRESENTER_OK ||
+        presenter_set_viewers(&presenter, viewers, viewer_count) !=
+            PRESENTER_OK ||
+        presenter_tick(&presenter, budget, stats) != PRESENTER_OK)
+        return MAP_RENDER_ERR_PRESENTER;
+    return MAP_RENDER_OK;
 #else
-    (void)screen; (void)frame_buf; (void)players; (void)player_ids;
-    (void)player_count;
+    (void)screen; (void)viewers; (void)viewer_count; (void)budget;
+    (void)stats;
+    return MAP_RENDER_ERR_UNSUPPORTED;
 #endif
 }
 
 void map_render_clear(struct map_render_ctx *ctx, struct screen_entry *screen)
 {
     (void)ctx;
+    if (!screen)
+        return;
+    surface_reset(screen->surface);
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
+    if (!screen->tiles) {
+        return;
+    }
     int tile_count = screen_geom_tile_count(&screen->geom);
     for (int i = 0; i < tile_count; i++) {
         struct renderer_alloc *allocation = screen->tiles[i].renderer;
         if (allocation) {
-            allocation->renderer.frame_ptr = nullptr;
+            allocation->renderer.tile_pixels = nullptr;
             allocation->renderer.pattern = MAP_TEST_NONE;
         }
     }
-    // The next playback starts from an unknown client state.
-    invalidate_sent_tiles(screen);
 #else
     (void)screen;
 #endif
@@ -615,13 +611,11 @@ int map_render_set_test_pattern(struct map_render_ctx *ctx,
     for (int i = 0; i < tile_count; i++) {
         struct renderer_alloc *allocation = screen->tiles[i].renderer;
         if (allocation) {
-            allocation->renderer.frame_ptr = nullptr;
+            allocation->renderer.tile_pixels = nullptr;
             allocation->renderer.pattern = pattern;
         }
     }
-    // The pattern replaces the video content, so the stored copies no
-    // longer describe what viewers see.
-    invalidate_sent_tiles(screen);
+    surface_reset(screen->surface);
     send_tiles(screen, players, player_ids, player_count, nullptr);
     return 0;
 #else
@@ -631,24 +625,83 @@ int map_render_set_test_pattern(struct map_render_ctx *ctx,
 #endif
 }
 
-int map_render_resend(struct map_render_ctx *ctx,
-                      const struct screen_entry *screen,
-                      void **players, const char **player_ids,
-                      int player_count)
+int map_render_resend(
+    struct map_render_ctx *ctx, struct screen_entry *screen,
+    const struct presenter_viewer *viewer,
+    struct presenter_resident_cursor *cursor, size_t budget,
+    bool *done, struct presenter_stats *stats)
 {
     (void)ctx;
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
-    if (!screen->tiles_initialized) {
+    if (!screen || !screen->surface || !screen->tiles_initialized ||
+        !viewer || !cursor || !done || !stats) {
         return -1;
     }
-    // A resend targets a viewer who has no client-side state yet, so it
-    // always transmits every tile regardless of change tracking.
-    send_tiles(screen, players, player_ids, player_count, nullptr);
+    struct map_presenter_context backend_context = {.screen = screen};
+    struct presenter presenter;
+    struct presenter_backend backend = {
+        .context = &backend_context,
+        .send = presenter_send_tile,
+    };
+    if (presenter_init(&presenter, screen->surface, &screen->geom, 16.0,
+                       backend) != PRESENTER_OK ||
+        presenter_resend(&presenter, viewer, cursor, budget, done, stats) !=
+            PRESENTER_OK)
+        return -1;
     return 0;
 #else
-    (void)screen; (void)players; (void)player_ids; (void)player_count;
+    (void)screen; (void)viewer; (void)cursor; (void)budget; (void)done;
+    (void)stats;
     return -2;
 #endif
+}
+
+enum map_render_error map_render_present_stream(
+    struct map_render_ctx *ctx, struct screen_entry *screen,
+    const struct presenter_viewer *viewers, size_t viewer_count,
+    uint64_t tile_count, uint64_t *cursor, size_t budget,
+    bool (*read_tile)(void *context, uint64_t tile_index, uint32_t tile_x,
+                      uint32_t tile_y, struct presenter_stream_tile *out),
+    void *read_context, bool *done, struct presenter_stats *stats)
+{
+    (void)ctx;
+#if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
+    if (!screen || !screen->surface || !screen->tiles_initialized ||
+        !stats)
+        return MAP_RENDER_ERR_PRESENTER;
+    struct map_presenter_context backend_context = {.screen = screen};
+    struct presenter presenter;
+    struct presenter_backend backend = {
+        .context = &backend_context,
+        .send = presenter_send_tile,
+    };
+    if (presenter_init(&presenter, screen->surface, &screen->geom, 16.0,
+                       backend) != PRESENTER_OK ||
+        presenter_set_viewers(&presenter, viewers, viewer_count) !=
+            PRESENTER_OK ||
+        presenter_stream(&presenter, tile_count, cursor, budget, read_tile,
+                         read_context, done, stats) != PRESENTER_OK)
+        return MAP_RENDER_ERR_PRESENTER;
+    return MAP_RENDER_OK;
+#else
+    (void)screen; (void)viewers; (void)viewer_count; (void)tile_count;
+    (void)cursor; (void)budget; (void)read_tile; (void)read_context;
+    (void)done; (void)stats;
+    return MAP_RENDER_ERR_UNSUPPORTED;
+#endif
+}
+
+enum map_render_error map_render_resend_stream(
+    struct map_render_ctx *ctx, struct screen_entry *screen,
+    const struct presenter_viewer *viewer, uint64_t tile_count,
+    uint64_t *cursor, size_t budget,
+    bool (*read_tile)(void *context, uint64_t tile_index, uint32_t tile_x,
+                      uint32_t tile_y, struct presenter_stream_tile *out),
+    void *read_context, bool *done, struct presenter_stats *stats)
+{
+    return map_render_present_stream(ctx, screen, viewer, 1, tile_count,
+                                     cursor, budget, read_tile, read_context,
+                                     done, stats);
 }
 
 int map_render_hide_viewer(struct map_render_ctx *ctx,
@@ -660,40 +713,21 @@ int map_render_hide_viewer(struct map_render_ctx *ctx,
     if (!screen || !screen->tiles_initialized || !player)
         return -1;
 
-    int pixel_width = screen_geom_pixel_width(&screen->geom);
-    int pixel_height = screen_geom_pixel_height(&screen->geom);
-    size_t frame_size =
-        (size_t)pixel_width * (size_t)pixel_height * sizeof(uint32_t);
-    uint8_t *black = calloc(1, frame_size);
-    if (!black)
-        return -1;
-
     int tile_count = screen_geom_tile_count(&screen->geom);
-    const uint8_t *frames[SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {0};
-    enum map_test_pattern patterns[
-        SCREEN_MAX_WIDTH * SCREEN_MAX_HEIGHT] = {0};
+    static const uint8_t black_tile[SURFACE_TILE_BYTES] = {0};
     for (int i = 0; i < tile_count; i++) {
         struct renderer_alloc *allocation = screen->tiles[i].renderer;
-        if (!allocation)
+        if (!allocation || !screen->tiles[i].valid ||
+            !screen->tiles[i].map_view)
             continue;
-        frames[i] = allocation->renderer.frame_ptr;
-        patterns[i] = allocation->renderer.pattern;
-        allocation->renderer.frame_ptr = black;
+        enum map_test_pattern pattern = allocation->renderer.pattern;
+        allocation->renderer.tile_pixels = black_tile;
         allocation->renderer.pattern = MAP_TEST_NONE;
+        es_player_send_map(player, screen->tiles[i].map_view);
+        allocation->renderer.tile_pixels = nullptr;
+        allocation->renderer.pattern = pattern;
     }
-
-    void *players[] = {player};
-    const char *player_ids[] = {player_id};
-    send_tiles(screen, players, player_ids, 1, nullptr);
-
-    for (int i = 0; i < tile_count; i++) {
-        struct renderer_alloc *allocation = screen->tiles[i].renderer;
-        if (!allocation)
-            continue;
-        allocation->renderer.frame_ptr = frames[i];
-        allocation->renderer.pattern = patterns[i];
-    }
-    free(black);
+    (void)player_id;
     return 0;
 #else
     (void)screen;
