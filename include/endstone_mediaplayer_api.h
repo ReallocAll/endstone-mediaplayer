@@ -426,12 +426,19 @@ static inline bool mp_try_get_api_v1(mp_api_v1 *out)
     // modules and prefer a currently active validated provider.
     api = mp_sdk_windows_api();
 #else
-    mp_get_api_symbol_fn symbol = (mp_get_api_symbol_fn)dlsym(
-        RTLD_DEFAULT, "endstone_mediaplayer_get_api");
-    void *module = (void *)0;
+    // dlopen(nullptr, ...) is POSIX and provides the main program's global
+    // symbol scope without loading the provider.  Retain the handle for the
+    // SDK's lifetime so API acquisition never affects module ownership.
+    static void *process = (void *)0;
+    if (!process) process = dlopen((const char *)0, RTLD_NOW);
+    mp_get_api_symbol_fn symbol = process
+        ? (mp_get_api_symbol_fn)dlsym(
+            process, "endstone_mediaplayer_get_api")
+        : (mp_get_api_symbol_fn)0;
     if (!symbol) {
 #if defined(RTLD_NOLOAD)
-        module = dlopen("endstone_mediaplayer.so", RTLD_NOW | RTLD_NOLOAD);
+        void *module = dlopen(
+            "endstone_mediaplayer.so", RTLD_NOW | RTLD_NOLOAD);
         if (module)
             symbol = (mp_get_api_symbol_fn)dlsym(
                 module, "endstone_mediaplayer_get_api");
