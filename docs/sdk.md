@@ -1,27 +1,31 @@
 # MediaPlayer C SDK
 
-`include/endstone_mediaplayer_api.h` is the complete public C23 SDK. It is a
-single header with a stable C ABI and a versioned V1 function table. The provider exports
-`endstone_mediaplayer_get_api(uint32_t version)` and currently returns a table
-only for `MP_API_V1`; an unsupported version returns no table.
+## Quick start
 
-The SDK looks up a provider that is already loaded in the current process. It
-does not load or unload the MediaPlayer module, and consumers do not link an
-import library or the plugin binary. All API calls must run on Endstone's main
-thread. Names, strings, and pixel buffers are borrowed only for the duration
-of a call.
+1. Install/deploy the native MediaPlayer provider with Endstone.
+2. Declare and load this consumer after the hard dependency `mediaplayer`.
+3. Run API calls only in the same Endstone process and on its main thread.
+4. Reacquire the API table and screen handles on every consumer-plugin enable
+   or MediaPlayer reload.
 
-On Windows, Endstone may shadow-copy the plugin to a loaded module named
-`endstone_mediaplayer-<hash>.dll`. The header enumerates loaded process modules
-and accepts either that form or `endstone_mediaplayer.dll`, validates the
-exported table, and prefers an active provider instance. It never loads a DLL.
-On Linux it resolves the process-global export, with a no-load module lookup as
-a fallback. These lookup paths are covered by the SDK tests and real BDS smoke
-tests.
+The SDK is for an Endstone consumer plugin running in-process. It is not a
+standalone external executable: a normal process cannot discover a provider
+that is loaded in the server process, and this header does not load one.
 
-## Acquire the API
+`include/endstone_mediaplayer_api.h` is the complete public C23 SDK. It exposes
+the stable V1 table through `mp_get_api_v1()` or `mp_try_get_api_v1()`. The
+provider export is `endstone_mediaplayer_get_api(uint32_t version)` and
+currently supports only `MP_API_V1`.
 
-Include the repository's `include` directory and use the header from C23:
+On Windows the header enumerates loaded process modules and accepts both the
+Endstone shadow-copy name `endstone_mediaplayer-<hash>.dll` and
+`endstone_mediaplayer.dll`; it validates the export and prefers an active
+provider instance. On Linux it resolves the process-global export with a
+no-load module lookup fallback. Neither path loads or unloads a DLL. This
+module-shadow-copy discovery is intentional and is covered by the SDK and
+real-BDS checks.
+
+## Acquire and validate the table
 
 ```c
 #include "endstone_mediaplayer_api.h"
@@ -30,35 +34,143 @@ mp_api_v1 mp = mp_get_api_v1();
 mp_screen_handle screen = MP_INVALID_SCREEN_HANDLE;
 mp_result result = mp.screen_find("live", &screen);
 if (result != MP_OK) {
-    const char *message = mp.result_string(result);
-    // Report or handle message.
+    // Report mp.result_string(result) in the consumer plugin.
 }
 ```
 
-`mp_try_get_api_v1(&mp)` returns `true` only when a valid, already-loaded
-provider exposes ABI V1. `mp_get_api_v1()` always returns a callable table. On
-failure, the header initializes a fallback table whose stateful functions
-return `MP_ERR_UNAVAILABLE`; screen/frame output handles are invalidated and a
-screen-list count is set to zero. When a provider is found, the SDK copies the
-provider table up to the smaller of its `struct_size` and the local table size
-after validating the ABI version and required function pointers. The copied
-table is safe to keep for the current provider instance, but its handles still
-follow the lifecycle rules below.
+`mp_try_get_api_v1(&mp)` returns `true` only for a valid already-loaded V1
+provider. `mp_get_api_v1()` always returns a callable table; when no provider
+is available its stateful functions return `MP_ERR_UNAVAILABLE`, invalidate
+output handles, and report an empty screen list. The local table is copied up
+to the smaller of the provider and local `struct_size` after ABI/version and
+required-function validation. Keep that copy only for the current provider
+instance.
 
-Every versioned input/output structure must set `struct_size` to the local
-structure size and `flags` to zero. The provider accepts known prefixes and
-copies only the returned structure size, allowing the table to evolve without
-assuming a newer consumer layout.
+Every versioned input/output structure must be zero-initialized, set
+`struct_size = sizeof(value)`, and set `flags = 0`. The provider accepts known
+prefixes and copies only the returned structure size, so this rule keeps code
+forward-compatible.
+
+## Screens: find versus create
+
+Use `screen_find` when Endstone or another plugin already owns the screen. It
+works for logical, plugin-managed, and world-backed screens. Use `screen_create`
+only for a new logical screen; the current provider rejects API creation of
+plugin-managed and world backends even though capabilities report those
+backends for discovery/update.
+
+API-created logical screens are sparse surfaces. Width and height are tile
+counts, each tile is 128×128 pixels, each axis is 1–1024 tiles, and the
+registry holds at most 64 screens. Creating a logical screen does not create a
+wall or allocate a full framebuffer. Query `capabilities_get` for the current
+ABI, tile size, limits, supported pixel-format bits, and backend bits.
+
+An OP player can run `/mpv materialize <name>` to upgrade an eligible logical
+screen of at most 7×4 tiles. The player must stand in the same air-and-backing
+layout used by `/mpv create`; the discovered backing must exactly match the
+logical dimensions. The feet-level air cell defines the bottom row, backing and
+floor blocks below that Y are ignored, and every display cell must be air.
+Maps are installed left-to-right and top-to-bottom. Materialization preserves
+the screen entry, runtime ID, surface generation, and pixels, so the existing
+`mp_screen_handle` remains valid while the backend and physical renderer state
+change. A logical screen has no physical output until it is materialized.
+
+## Pixel contract
+
+Region `x`, `y`, `width`, and `height` are pixel coordinates. Tile operations
+use tile coordinates, and one tile is always 128×128 pixels. Every supported
+format has four bytes per pixel. For a region, `stride >= width * 4` and the
+minimum buffer size is:
+
+```text
+(height - 1) * stride + width * 4
+```
+
+The provider borrows the pointer synchronously and copies pixels during the
+call; it never retains the caller's buffer. The supported constants are
+`MP_PIXEL_FORMAT_ABGR`, `MP_PIXEL_FORMAT_BGRA`, and `MP_PIXEL_FORMAT_RGBA`.
+On the supported little-endian targets, the current provider accepts ABGR's
+packed representation as direct `R,G,B,A` bytes, and accepts RGBA input as
+direct `R,G,B,A` bytes. BGRA input is `B,G,R,A` and is converted to the
+internal `R,G,B,A` bytes. Check `caps.pixel_format_bits` instead of assuming a
+future provider supports every format.
+
+For bandwidth and allocation reasons, avoid per-pixel calls. Batch adjacent
+pixels into regions or stage several regions in one frame transaction.
+
+```c
+const uint32_t width = 16;
+const uint32_t height = 16;
+const uint64_t stride = (uint64_t)width * 4;
+const uint64_t bytes = (uint64_t)(height - 1) * stride + width * 4;
+
+mp_result result = mp.screen_update_region(
+    screen, 0, 0, width, height, rgba_pixels, bytes, stride,
+    MP_PIXEL_FORMAT_RGBA);
+```
+
+`screen_update_tile` is the corresponding one-tile operation. Each direct
+update is one atomic frame. For multiple regions that must become visible
+together, use `frame_begin`, `frame_update_region` or `frame_update_tile`, and
+`frame_commit`; on any update or commit error, call `frame_abort` while the
+frame is still active. Only one frame can be active for a screen, so contention
+returns `MP_ERR_BUSY`. A successful commit or abort consumes the frame handle;
+a failed commit intentionally leaves it active so it can be aborted.
+
+## Lifecycle and ownership
+
+The API table carries `instance_id`. MediaPlayer changes it on every enable
+cycle and sets it to zero while inactive. Screen and frame handles are opaque;
+do not inspect, serialize, or reuse their numeric values across lifecycle
+boundaries. Reacquire the table and all handles in each consumer-plugin
+`on_enable`/enable callback, and compare the current `instance_id` before
+reusing wrappers.
+
+`screen_clear` stops producers, retires active frames, resets resident pixels,
+and preserves the screen entry and screen handle. `screen_delete` removes the
+entry and invalidates its handle. A frame handle becomes invalid after a
+successful commit or abort, screen clear/deletion, or provider
+disable/reload. Direct API writes replace an active video, static image, or
+soundtrack; starting `/mpv play` or `/mpv image` replaces an active direct
+producer. Do not call clear or delete merely to finish a normal update: clear
+erases the visible pixels.
+
+The provider owns screen/frame state. Names, strings, structures supplied to a
+call, and pixel buffers are borrowed only for that call. The SDK does not
+retain any of them.
+
+## C function cheat sheet
+
+| Purpose | V1 function |
+| --- | --- |
+| Discover provider | `mp_get_api_v1`, `mp_try_get_api_v1`, `result_string` |
+| Capabilities | `capabilities_get(mp_capabilities *)` |
+| Create/find/list | `screen_create`, `screen_find`, `screen_list` |
+| Inspect | `screen_get_info`, `screen_get_stats` |
+| Change/remove | `screen_rename`, `screen_clear`, `screen_delete` |
+| Direct pixels | `screen_update_region`, `screen_update_tile` |
+| Atomic frame | `frame_begin`, `frame_update_region`, `frame_update_tile`, `frame_commit`, `frame_abort` |
+| Lifecycle | reacquire the table and handles after enable/reload; no explicit close function |
+
+`screen_list` supports a size query with `capacity = 0`; it writes the required
+count. A short supplied array returns `MP_ERR_BUFFER_TOO_SMALL` and also reports
+the required count.
+
+The complete callback signatures are in
+[`include/endstone_mediaplayer_api.h`](../include/endstone_mediaplayer_api.h).
+[`examples/basic_screen.c`](../examples/basic_screen.c) is a callback helper,
+not a standalone `main` program, and demonstrates create-or-find, info,
+updates, a two-region frame, stats, and temporary-buffer cleanup.
 
 ## Results and errors
 
-`MP_OK` is zero. Check every result, or use `result_string` for the stable
-human-readable name. The complete V1 result set is:
+`MP_OK` is zero. Check every result; `result_string` returns the stable human-
+readable name. The V1 results are:
 
 | Result | Meaning |
 | --- | --- |
 | `MP_ERR_UNAVAILABLE` | Provider is absent, inactive, or the fallback table is in use |
-| `MP_ERR_INVALID_ARGUMENT` | Null, malformed, unsupported flags, wrong structure size, range, format, or buffer argument |
+| `MP_ERR_INVALID_ARGUMENT` | Null/malformed argument, unsupported flags, wrong structure size, range, format, or buffer |
 | `MP_ERR_INVALID_HANDLE` | Unknown or stale screen/frame handle |
 | `MP_ERR_NOT_FOUND` | Named screen does not exist |
 | `MP_ERR_ALREADY_EXISTS` | Screen name is already registered |
@@ -70,115 +182,25 @@ human-readable name. The complete V1 result set is:
 | `MP_ERR_IO` | Provider I/O failure |
 | `MP_ERR_INTERNAL` | Provider-internal failure |
 
-`MP_ERR_INVALID_ARG` and `MP_ERR_EXISTS` are compatibility aliases for the
+`MP_ERR_INVALID_ARG` and `MP_ERR_EXISTS` remain compatibility aliases for the
 corresponding longer names.
 
-## Lifecycle, handles, and reacquisition
+## Limits and troubleshooting
 
-The API table carries an `instance_id`. MediaPlayer changes it on every enable
-cycle and sets it to zero while inactive. Screen and frame handles are opaque;
-do not inspect or serialize their numeric values. A screen handle becomes
-stale after screen deletion or provider disable/reload. `screen_clear` keeps
-the screen handle but stops its producer and retires active frames. A frame
-handle becomes invalid after successful `frame_commit`, `frame_abort`, screen
-clear/deletion, or provider disable/reload. The provider also invalidates
-output handles on failed acquire/create/find/begin calls where applicable.
+`mp_stats` reports logical dimensions, generation, resident and pending tile
+counts, limits, dropped tiles, and allocated/staged pixel bytes. The current
+capability table reports 4096 maximum resident tiles and 256 pending tiles;
+large sparse updates can still consume substantial memory and bandwidth.
 
-Reacquire the API table and all screen handles during each consumer-plugin
-enable. Do not cache handles or a table across a MediaPlayer lifecycle change;
-use the current `instance_id` to detect a provider reload before reusing a
-wrapper or handle.
-
-## Screens, capabilities, and limits
-
-An API-created screen is a logical sparse surface. Each axis is 1 through
-1024 tiles, each tile is 128×128 pixels, and the provider registry holds at
-most 64 screens. The current capability table reports a maximum of 4096
-resident tiles and 256 pending tiles. It also reports support bits for
-ABGR8888, BGRA8888, and RGBA8888, and for logical, plugin-managed, and world
-backends. `screen_create` currently creates logical screens; plugin-managed or
-world screens are existing world-backed screens that can be found and updated
-when exposed by the provider.
-
-```c
-mp_capabilities caps = {
-    .struct_size = sizeof(caps),
-    .flags = 0,
-};
-mp_result result = mp.capabilities_get(&caps);
-```
-
-Logical dimensions do not materialize a wall or allocate a full framebuffer.
-The separate world `/mpv create` path remains limited to a physical 7×4 map
-screen, and MCV1 remains compatible with that path with a fixed maximum 7×4
-tile grid. MCV video and
-MPS1 static-image playback are producers for those screens; direct API writes
-replace an active video, static image, or soundtrack on the target screen, and
-starting `/mpv play` or `/mpv image` replaces an active direct producer. Large
-logical updates can still consume substantial bandwidth and sparse resident or
-pending capacity, so query `screen_get_stats` and `capabilities_get` rather
-than assuming that logical size equals materialized map count.
-
-An API-created logical screen can be upgraded in place by an OP player with
-`/mpv materialize <name>`. The player must stand in the same air-and-backing
-layout used by `/mpv create`, and the discovered backing must exactly match the
-logical tile dimensions (up to the physical 7×4 limit). The player's feet-level
-air cell defines the bottom screen row; backing and floor blocks below that Y
-are ignored, while every actual display cell must be air. Maps are installed
-left-to-right and top-to-bottom using their row/column labels. Materialization
-preserves the screen entry, runtime ID, Surface generation and pixels, and the
-existing `mp_screen_handle` remains valid; only the backend and physical map
-renderer state change.
-
-The CRUD and inspection functions are:
-
-- `screen_create` and `screen_delete`
-- `screen_find` and `screen_list`
-- `screen_get_info`, `screen_get_stats`, and `capabilities_get`
-- `screen_rename` and `screen_clear`
-
-`screen_list` supports a size-query call with `capacity = 0`; if the supplied
-array is short it returns `MP_ERR_BUFFER_TOO_SMALL` and reports the required
-count.
-
-## Pixel updates and formats
-
-Region coordinates and dimensions are pixels. Tile coordinates identify one
-128×128 tile. All formats use four bytes per pixel: `MP_PIXEL_FORMAT_ABGR`,
-`MP_PIXEL_FORMAT_BGRA`, and `MP_PIXEL_FORMAT_RGBA`. Supply the available byte
-count and row stride; the stride must cover `width * 4` bytes and the buffer
-must cover the requested rows. The provider copies pixels during the call and
-retains no caller pointer.
-
-```c
-const uint32_t width = 896;
-const uint32_t height = 512;
-const uint64_t stride = (uint64_t)width * 4;
-const uint64_t bytes = stride * height;
-
-mp_result result = mp.screen_update_region(
-    screen, 0, 0, width, height, bgra_pixels, bytes, stride,
-    MP_PIXEL_FORMAT_BGRA);
-```
-
-The `screen_update_tile` operation takes one tile and its tile coordinates.
-Every update is an atomic single-frame operation. For several updates that
-must become visible together, use an explicit frame transaction:
-
-```c
-mp_frame_handle frame = MP_INVALID_FRAME_HANDLE;
-mp_result result = mp.frame_begin(screen, &frame);
-if (result == MP_OK) {
-    result = mp.frame_update_region(
-        frame, 0, 0, width, height, bgra_pixels, bytes, stride,
-        MP_PIXEL_FORMAT_BGRA);
-    if (result == MP_OK)
-        result = mp.frame_commit(frame);
-    if (result != MP_OK)
-        (void)mp.frame_abort(frame);
-}
-```
-
-Only one frame may be active for a screen at a time; contention returns
-`MP_ERR_BUSY`. A successful commit or abort consumes the frame handle. If a
-commit fails, the frame remains active so the caller can abort it.
+- `MP_ERR_UNAVAILABLE`: the provider is disabled, the consumer is in the wrong
+  process, or dependency/load order is wrong. Load the consumer after
+  `mediaplayer` and reacquire in its enable callback.
+- `MP_ERR_INVALID_HANDLE`: a cached handle is stale after provider reload,
+  disable, or delete. `screen_clear` preserves the screen handle but
+  invalidates any active frame handle.
+- `MP_ERR_BUSY`: another frame is active; finish it or abort it before starting
+  a new one.
+- Black/no physical output: a logical screen has not been materialized. Use
+  `/mpv materialize` for eligible 7×4-or-smaller logical screens.
+- Slow or memory-heavy updates: avoid per-pixel calls; batch regions or frames,
+  check capabilities, and watch `screen_get_stats`.
