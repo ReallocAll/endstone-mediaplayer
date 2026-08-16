@@ -3,7 +3,7 @@
 
 // Plugin version (override via -DMP_VERSION="x.y.z" at compile time).
 #ifndef MP_VERSION
-#define MP_VERSION "2.3.0"
+#define MP_VERSION "2.3.1"
 #endif
 
 #endif

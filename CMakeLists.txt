@@ -17,7 +17,7 @@ if(WIN32 AND NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     message(FATAL_ERROR "Windows SDK consumers require clang-cl")
 endif()
 
-set(MP_VERSION "2.3.0" CACHE STRING "MediaPlayer plugin version")
+set(MP_VERSION "2.3.1" CACHE STRING "MediaPlayer plugin version")
 option(ENABLE_MPV_DEBUG_COMMANDS "Expose /mpv debug diagnostics" OFF)
 
 set(CMAKE_C_STANDARD 23)
