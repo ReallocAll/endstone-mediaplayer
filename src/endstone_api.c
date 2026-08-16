@@ -3,6 +3,7 @@
 #include <cppcompat/string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if ES_PLATFORM_WINDOWS
@@ -10,6 +11,44 @@
 #endif
 
 extern void *g_plugin;
+extern void cppcompat_free(void *ptr);
+
+int server_get_online_players(void *server, void **players, int capacity)
+{
+    if (!server || !players || capacity <= 0 ||
+        !VTABLE(server)[ES_SERVER_SLOT_GET_ONLINE_PLAYERS])
+        return -1;
+
+    _Alignas(void *) unsigned char result[ES_VECTOR_SIZE] = {0};
+#if ES_PLATFORM_LINUX
+    ((void (*)(void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_GET_ONLINE_PLAYERS])(result, server);
+#else
+    ((void *(*)(void *, void *))
+        VTABLE(server)[ES_SERVER_SLOT_GET_ONLINE_PLAYERS])(server, result);
+#endif
+
+    void **begin = *(void ***)result;
+    void **end = *(void ***)(result + sizeof(void *));
+    if (!begin && !end)
+        return 0;
+
+    uintptr_t begin_address = (uintptr_t)begin;
+    uintptr_t end_address = (uintptr_t)end;
+    if (!begin || !end || end_address < begin_address ||
+        (end_address - begin_address) % sizeof(void *) != 0) {
+        if (begin)
+            cppcompat_free(begin);
+        return -1;
+    }
+
+    size_t count = (end_address - begin_address) / sizeof(void *);
+    size_t copied = count < (size_t)capacity ? count : (size_t)capacity;
+    if (copied > 0)
+        memcpy(players, begin, copied * sizeof(void *));
+    cppcompat_free(begin);
+    return (int)copied;
+}
 
 FILE *fopen_utf8(const char *path, const char *mode)
 {

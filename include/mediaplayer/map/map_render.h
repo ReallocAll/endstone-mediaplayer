@@ -53,6 +53,10 @@ void map_render_init(struct map_render_ctx *ctx, void *server, void *plugin);
 enum map_render_error map_render_init_screen(
     struct map_render_ctx *ctx, struct screen_entry *screen, void *player);
 
+// Restores a persisted screen using only its complete set of existing map IDs.
+enum map_render_error map_render_restore_screen(
+    struct map_render_ctx *ctx, struct screen_entry *screen, void *player);
+
 // Detaches and destroys a screen's renderers.
 void map_render_destroy_screen(struct map_render_ctx *ctx, struct screen_entry *screen);
 

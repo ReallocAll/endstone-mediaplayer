@@ -40,6 +40,10 @@ static int64_t get_mono_ms(void)
 }
 #endif
 
+static void clear_screen_checkpoint(struct screen_entry *screen);
+static void sync_screen_checkpoint(struct screen_entry *screen,
+                                   const struct video_session *sess);
+
 // --- Message helper ---
 #include <stdarg.h>
 static void send_err(void *sender, const char *fmt, ...)
@@ -97,6 +101,16 @@ void video_ctx_init(struct video_ctx *ctx, void *server, void *plugin,
 void video_ctx_shutdown(struct video_ctx *ctx)
 {
     if (!ctx->active) return;
+    for (int i = 0; i < ctx->registry.count; i++) {
+        struct screen_entry *screen = ctx->registry.screens[i];
+        struct video_session *sess =
+            video_engine_find(&ctx->engine, screen->runtime_id);
+        if (sess && (sess->state == PLAY_PLAYING ||
+                     sess->state == PLAY_PAUSED))
+            sync_screen_checkpoint(screen, sess);
+        else if (sess && sess->state == PLAY_FINISHED)
+            clear_screen_checkpoint(screen);
+    }
     ctx->active = 0;
 
     // Detach renderers before freeing session frame buffers.
@@ -231,8 +245,106 @@ static void remove_resend_job(struct video_online_player *online, int index)
 static void stop_screen_playback(struct video_ctx *ctx,
                                  struct screen_entry *screen);
 
+static void clear_screen_checkpoint(struct screen_entry *screen)
+{
+    if (!screen)
+        return;
+    memset(&screen->playback, 0, sizeof(screen->playback));
+    screen->playback.state = SCREEN_PLAYBACK_STOPPED;
+    screen->playing = 0;
+}
+
+static void sync_screen_checkpoint(struct screen_entry *screen,
+                                   const struct video_session *sess)
+{
+    if (!screen || !sess || !sess->active ||
+        (sess->state != PLAY_PLAYING && sess->state != PLAY_PAUSED))
+        return;
+    screen->playback.state = sess->state == PLAY_PAUSED
+                                 ? SCREEN_PLAYBACK_PAUSED
+                                 : SCREEN_PLAYBACK_PLAYING;
+    screen->playback.current_frame = sess->current_frame;
+    screen->playback.loop_total = sess->loop_total;
+    screen->playback.loop_current = sess->loop_current;
+    screen->playing = 1;
+}
+
+static const struct video_entry *find_catalog_video(
+    const struct video_catalog *catalog, const char *name)
+{
+    if (!catalog || !name || !name[0])
+        return nullptr;
+    for (int i = 0; i < catalog->count; i++) {
+        if (strcmp(catalog->entries[i].name, name) == 0)
+            return &catalog->entries[i];
+    }
+    return nullptr;
+}
+
+static int restore_screen_video(struct video_ctx *ctx,
+                                struct screen_entry *screen,
+                                void *viewer, int64_t now_ms,
+                                int *catalog_refreshed)
+{
+    if (!ctx || !screen || !viewer || !catalog_refreshed ||
+        !screen->plugin_managed || !screen->tiles_initialized ||
+        (screen->playback.state != SCREEN_PLAYBACK_PLAYING &&
+         screen->playback.state != SCREEN_PLAYBACK_PAUSED) ||
+        video_engine_find(&ctx->engine, screen->runtime_id) ||
+        mps_source_find(&ctx->image_engine, screen->runtime_id))
+        return 0;
+
+    if (!*catalog_refreshed) {
+        video_catalog_refresh(&ctx->catalog);
+        *catalog_refreshed = 1;
+    }
+    const struct video_entry *video =
+        find_catalog_video(&ctx->catalog, screen->playback.video_name);
+    if (!video || !mpv_video_fits_screen(video->tile_width, video->tile_height,
+                                         screen->geom.width,
+                                         screen->geom.height))
+        return 0;
+
+    struct video_session *sess =
+        video_engine_acquire(&ctx->engine, screen->runtime_id);
+    if (!sess)
+        return 0;
+
+    struct screen_playback_checkpoint checkpoint = screen->playback;
+    if (video_session_restore(sess, video->path, checkpoint.loop_total,
+                              checkpoint.loop_current,
+                              checkpoint.current_frame,
+                              screen->runtime_id, now_ms) != 0) {
+        video_engine_release(&ctx->engine, screen->runtime_id);
+        return 0;
+    }
+
+    struct nbs_error_info nbs_error = {0};
+    if (ctx->music_catalog && ctx->music_cache)
+        (void)screen_audio_start(&ctx->audio, ctx->music_cache,
+                                 ctx->music_catalog, screen->runtime_id,
+                                 checkpoint.video_name, &nbs_error);
+    if (checkpoint.state == SCREEN_PLAYBACK_PAUSED)
+        video_session_pause(sess, now_ms);
+    sync_screen_checkpoint(screen, sess);
+    if (map_render_submit_frame(screen, sess->frame_buf, sess->frame_buf_size,
+                                SURFACE_FORMAT_ABGR8888) != MAP_RENDER_OK) {
+        map_render_clear(&ctx->render, screen);
+        screen_audio_stop(&ctx->audio, screen->runtime_id);
+        video_engine_release(&ctx->engine, screen->runtime_id);
+        screen->playback = checkpoint;
+        screen->playing = 1;
+        return 0;
+    }
+    return 1;
+}
+
 static void refresh_public_viewers(struct video_ctx *ctx)
 {
+    bool restore_attempted[SCREEN_REGISTRY_MAX] = {0};
+    bool playback_restore_attempted[SCREEN_REGISTRY_MAX] = {0};
+    int catalog_refreshed = 0;
+    int64_t now = get_mono_ms();
     for (int p = 0; p < ctx->online_count; p++) {
         struct video_online_player *online = &ctx->online_players[p];
         refresh_player_snapshot(online);
@@ -250,8 +362,23 @@ static void refresh_public_viewers(struct video_ctx *ctx)
             if (!eligible) continue;
 
             eligible_ids[eligible_count++] = screen->runtime_id;
-            if (transition == MPV_MEMBERSHIP_ENTERED &&
-                screen->tiles_initialized) {
+            bool restored_now = false;
+            if (screen->plugin_managed && !screen->tiles_initialized &&
+                !restore_attempted[s]) {
+                restore_attempted[s] = true;
+                restored_now = map_render_restore_screen(
+                    &ctx->render, screen, online->player) == MAP_RENDER_OK;
+            }
+            bool video_restored_now = false;
+            if (screen->plugin_managed && screen->tiles_initialized &&
+                !playback_restore_attempted[s]) {
+                playback_restore_attempted[s] = true;
+                video_restored_now = restore_screen_video(
+                    ctx, screen, online->player, now, &catalog_refreshed);
+            }
+            if (restored_now || video_restored_now ||
+                (transition == MPV_MEMBERSHIP_ENTERED &&
+                 screen->tiles_initialized)) {
                 struct mps_source *source = mps_source_find(
                     &ctx->image_engine, screen->runtime_id);
                 queue_resend(online, screen->runtime_id,
@@ -338,7 +465,7 @@ static void stop_screen_playback(struct video_ctx *ctx,
     screen_audio_stop(&ctx->audio, screen->runtime_id);
     video_engine_release(&ctx->engine, screen->runtime_id);
     mps_source_release(&ctx->image_engine, screen->runtime_id);
-    screen->playing = 0;
+    clear_screen_checkpoint(screen);
 }
 
 // --- Tick ---
@@ -377,6 +504,8 @@ void video_tick(struct video_ctx *ctx)
             continue;
         }
         if (!sess || sess->state != PLAY_PLAYING) {
+            if (sess)
+                sync_screen_checkpoint(screen, sess);
             struct presenter_stats stats;
             map_render_present(&ctx->render, screen, presenter_viewers,
                                (size_t)presenter_viewer_count, 28, &stats);
@@ -389,6 +518,7 @@ void video_tick(struct video_ctx *ctx)
             stop_screen_playback(ctx, screen);
             continue;
         }
+        sync_screen_checkpoint(screen, sess);
 
         void *op[64];
         const char *oids[64];
@@ -402,15 +532,19 @@ void video_tick(struct video_ctx *ctx)
         }
 
         if (tick.frame_changed) {
-            if (video_session_load_frame(sess, tick.frame) == 0) {
+            if (video_session_load_frame(sess, tick.frame) != 0 ||
                 map_render_submit_frame(
                     screen, sess->frame_buf, sess->frame_buf_size,
-                    SURFACE_FORMAT_ABGR8888);
+                    SURFACE_FORMAT_ABGR8888) != MAP_RENDER_OK) {
+                stop_screen_playback(ctx, screen);
+                continue;
             }
         }
         struct presenter_stats stats;
-        map_render_present(&ctx->render, screen, presenter_viewers,
-                           (size_t)presenter_viewer_count, 28, &stats);
+        if (map_render_present(&ctx->render, screen, presenter_viewers,
+                               (size_t)presenter_viewer_count, 28, &stats) !=
+            MAP_RENDER_OK)
+            stop_screen_playback(ctx, screen);
     }
 }
 
@@ -982,6 +1116,7 @@ static int materialize_restore_persisted_state(
     screen->tiles_capacity = old_state->tiles_capacity;
     screen->tiles_initialized = old_state->tiles_initialized;
     screen->playing = old_state->playing;
+    screen->playback = old_state->playback;
     return screen_persistence_save(&ctx->registry, ctx->save_path);
 }
 
@@ -1406,6 +1541,12 @@ static void cmd_play(struct video_ctx *ctx, void *sender, void *player,
     }
 
     screen->playing = 1;
+    screen->playback.state = SCREEN_PLAYBACK_PLAYING;
+    snprintf(screen->playback.video_name,
+             sizeof(screen->playback.video_name), "%s", vid->name);
+    screen->playback.current_frame = 0;
+    screen->playback.loop_total = sess->loop_total;
+    screen->playback.loop_current = sess->loop_current;
 
     char buf[128];
     snprintf(buf, sizeof(buf), MC_GREEN "[MediaPlayer] " MC_GRAY "Playing '%s' on screen '%s' (loop: %d)",
@@ -1501,9 +1642,37 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
         &ctx->engine, screen->runtime_id);
     struct mps_source *source = mps_source_find(
         &ctx->image_engine, screen->runtime_id);
-    if (action != 0 && !sess) {
+    if (action != 0 && !sess && source) {
         send_err(sender, source ? "Static images do not support pause/resume."
                                 : "Screen is not playing.");
+        return;
+    }
+
+    if (action != 0 && !sess) {
+        if (screen->playback.state != SCREEN_PLAYBACK_PLAYING &&
+            screen->playback.state != SCREEN_PLAYBACK_PAUSED) {
+            send_err(sender, "Screen is not playing.");
+            return;
+        }
+        if (action == 1) {
+            if (screen->playback.state == SCREEN_PLAYBACK_PAUSED) {
+                sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY
+                                    "Already paused");
+            } else {
+                screen->playback.state = SCREEN_PLAYBACK_PAUSED;
+                screen->playing = 1;
+                sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY
+                                    "Paused");
+            }
+        } else if (screen->playback.state != SCREEN_PLAYBACK_PAUSED) {
+            sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY
+                                "Not paused");
+        } else {
+            screen->playback.state = SCREEN_PLAYBACK_PLAYING;
+            screen->playing = 1;
+            sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY
+                                "Resumed");
+        }
         return;
     }
 
@@ -1511,7 +1680,8 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
 
     switch (action) {
     case 0:
-        if (!sess && !source) {
+        if (!sess && !source &&
+            screen->playback.state == SCREEN_PLAYBACK_STOPPED) {
             send_err(sender, "Screen is not playing.");
             return;
         }
@@ -1523,6 +1693,7 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
             sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Already paused");
         } else {
             video_session_pause(sess, now);
+            sync_screen_checkpoint(screen, sess);
             sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Paused");
         }
         break;
@@ -1531,6 +1702,7 @@ static void cmd_pause_resume_stop(struct video_ctx *ctx, void *sender,
             sender_send_message(sender, MC_RED "[MediaPlayer] " MC_GRAY "Not paused");
         } else {
             video_session_resume(sess, now);
+            sync_screen_checkpoint(screen, sess);
             sender_send_message(sender, MC_GREEN "[MediaPlayer] " MC_GRAY "Resumed");
         }
         break;
@@ -1564,6 +1736,27 @@ static void cmd_status(struct video_ctx *ctx, void *sender, int argc, const char
             sender_send_message(sender, buf);
             snprintf(buf, sizeof(buf), MC_GRAY "Image: %s",
                      source->image_name[0] ? source->image_name : "(unnamed)");
+            sender_send_message(sender, buf);
+            return;
+        }
+        if (screen->playback.state == SCREEN_PLAYBACK_PLAYING ||
+            screen->playback.state == SCREEN_PLAYBACK_PAUSED) {
+            const char *state = screen->playback.state ==
+                                        SCREEN_PLAYBACK_PAUSED
+                                    ? "paused (waiting for viewer)"
+                                    : "playing (waiting for viewer)";
+            snprintf(buf, sizeof(buf), MC_AQUA "Screen '%s': " MC_WHITE "%s",
+                     screen->name, state);
+            sender_send_message(sender, buf);
+            snprintf(buf, sizeof(buf), MC_GRAY "Video: %s; frame: %u",
+                     screen->playback.video_name,
+                     screen->playback.current_frame + 1);
+            sender_send_message(sender, buf);
+            snprintf(buf, sizeof(buf), MC_GRAY "Loop: %d/%d",
+                     screen->playback.loop_current,
+                     screen->playback.loop_total == -1
+                         ? 0
+                         : screen->playback.loop_total);
             sender_send_message(sender, buf);
             return;
         }

@@ -1692,6 +1692,47 @@ static int test_clock_pause_resume(void)
     return 1;
 }
 
+static int test_session_restore_checkpoint(void)
+{
+    struct video_session session = {0};
+    const char *path = fixture("test_restore_checkpoint.mcv");
+    EXPECT(create_test_mcv(1, 1, 20, 1, 10, path),
+           "create checkpoint restore fixture");
+
+    EXPECT(video_session_restore(&session, path, 3, 2, 4, 77, 10000) == 0,
+           "restore finite-loop checkpoint");
+    EXPECT(session.active && session.state == PLAY_PLAYING &&
+               session.current_frame == 4 && session.loop_current == 2 &&
+               session.loop_total == 3 && session.screen_runtime_id == 77,
+           "restored session retains checkpoint identity and position");
+    struct video_tick_result tick;
+    video_session_tick_detailed(&session, 10050, &tick);
+    EXPECT(tick.frame_changed && tick.frame == 5 && tick.loop_current == 2,
+           "restored clock advances from saved finite-loop frame");
+    video_session_pause(&session, 10050);
+    video_session_tick_detailed(&session, 11050, &tick);
+    EXPECT(!tick.frame_changed && session.current_frame == 5 &&
+               session.state == PLAY_PAUSED,
+           "paused restored session remains frozen");
+    video_session_stop(&session);
+
+    EXPECT(video_session_restore(&session, path, -1, 5, 9, 88, 20000) == 0,
+           "restore infinite-loop checkpoint");
+    video_session_tick_detailed(&session, 20050, &tick);
+    EXPECT(tick.frame_changed && tick.frame == 0 && tick.loop_current == 6,
+           "infinite-loop restore crosses the saved loop boundary");
+    video_session_stop(&session);
+
+    EXPECT(video_session_restore(&session, path, 1, 1, 10, 99, 30000) != 0 &&
+               !session.active,
+           "out-of-range checkpoint fails without a live session");
+    EXPECT(video_session_restore(&session, path, -2, 1, 0, 99, 30000) != 0 &&
+               !session.active,
+           "invalid loop checkpoint fails without a live session");
+    remove(path);
+    return 1;
+}
+
 static int test_clock_single_play(void)
 {
     struct video_session s;
@@ -2779,6 +2820,116 @@ static int test_persistence_roundtrip(void)
     screen_registry_cleanup(&reg);
     screen_registry_cleanup(&reg2);
     remove(path);
+    return 1;
+}
+
+static int test_persistence_playback_checkpoint(void)
+{
+    const char *path = fixture("test_playback_checkpoint.json");
+    const char *invalid_path = fixture("test_playback_checkpoint_invalid.json");
+    remove_persistence_artifacts(path);
+    remove_persistence_artifacts(invalid_path);
+
+    struct screen_registry registry;
+    screen_registry_init(&registry);
+    struct screen_pos position = {10, 64, 10};
+    struct screen_geom geometry;
+    EXPECT(screen_geom_validate(position, position, "minecraft:overworld",
+                                "minecraft:overworld", SCREEN_FACE_SOUTH,
+                                &geometry) == SCREEN_GEOM_OK,
+           "construct playback persistence geometry");
+    int playing_index = -1;
+    int paused_index = -1;
+    int stopped_index = -1;
+    EXPECT(screen_registry_create(&registry, "playing", "owner", &geometry,
+                                  &playing_index) == SCREEN_OK &&
+               screen_registry_create(&registry, "paused", "owner", &geometry,
+                                      &paused_index) == SCREEN_OK &&
+               screen_registry_create(&registry, "stopped", "owner", &geometry,
+                                      &stopped_index) == SCREEN_OK,
+           "create playback persistence screens");
+
+    struct screen_entry *playing = registry.screens[playing_index];
+    playing->playback.state = SCREEN_PLAYBACK_PLAYING;
+    snprintf(playing->playback.video_name,
+             sizeof(playing->playback.video_name), "%s", "demo");
+    playing->playback.current_frame = 42;
+    playing->playback.loop_total = -1;
+    playing->playback.loop_current = 7;
+    playing->playing = 1;
+
+    struct screen_entry *paused = registry.screens[paused_index];
+    paused->playback.state = SCREEN_PLAYBACK_PAUSED;
+    snprintf(paused->playback.video_name,
+             sizeof(paused->playback.video_name), "%s", "intro");
+    paused->playback.current_frame = 9;
+    paused->playback.loop_total = 3;
+    paused->playback.loop_current = 2;
+    paused->playing = 1;
+
+    EXPECT(screen_persistence_save(&registry, path) == 0,
+           "save playing, paused, and stopped checkpoints");
+    size_t json_size = 0;
+    unsigned char *json = persistence_read_bytes(path, &json_size);
+    EXPECT(json != nullptr && json_size > 0,
+           "read playback checkpoint manifest");
+    int playback_fields = 0;
+    if (json) {
+        const char *cursor = (const char *)json;
+        while ((cursor = strstr(cursor, "\"playback\"")) != nullptr) {
+            playback_fields++;
+            cursor++;
+        }
+    }
+    EXPECT(playback_fields == 2,
+           "stopped screen omits the optional playback object");
+    free(json);
+
+    struct screen_registry loaded;
+    screen_registry_init(&loaded);
+    int warnings = 0;
+    EXPECT(screen_persistence_load(&loaded, path, &warnings) == 0 &&
+               warnings == 0 && loaded.count == 3,
+           "load playback checkpoints");
+    playing = loaded.screens[screen_registry_find(&loaded, "playing")];
+    paused = loaded.screens[screen_registry_find(&loaded, "paused")];
+    struct screen_entry *stopped =
+        loaded.screens[screen_registry_find(&loaded, "stopped")];
+    EXPECT(playing->playback.state == SCREEN_PLAYBACK_PLAYING &&
+               strcmp(playing->playback.video_name, "demo") == 0 &&
+               playing->playback.current_frame == 42 &&
+               playing->playback.loop_total == -1 &&
+               playing->playback.loop_current == 7 && playing->playing,
+           "playing checkpoint round-trips");
+    EXPECT(paused->playback.state == SCREEN_PLAYBACK_PAUSED &&
+               strcmp(paused->playback.video_name, "intro") == 0 &&
+               paused->playback.current_frame == 9 &&
+               paused->playback.loop_total == 3 &&
+               paused->playback.loop_current == 2 && paused->playing,
+           "paused checkpoint round-trips");
+    EXPECT(stopped->playback.state == SCREEN_PLAYBACK_STOPPED &&
+               !stopped->playing,
+           "absent playback object loads as stopped");
+
+    FILE *invalid = fopen(invalid_path, "wb");
+    EXPECT(invalid != nullptr, "open malformed playback fixture");
+    fprintf(invalid,
+            "{\"format_version\":2,\"screens\":[{"
+            "\"name\":\"bad\",\"owner_uuid\":\"owner\","
+            "\"dimension\":\"minecraft:overworld\",\"facing\":0,"
+            "\"width\":1,\"height\":1,\"plugin_managed\":false,"
+            "\"corner1\":{\"x\":10,\"y\":64,\"z\":10},"
+            "\"corner2\":{\"x\":10,\"y\":64,\"z\":10},"
+            "\"playback\":{\"state\":\"playing\",\"video\":\"demo\","
+            "\"current_frame\":0,\"loop_total\":-2,\"loop_current\":1}}]}");
+    fclose(invalid);
+    EXPECT(screen_persistence_load(&loaded, invalid_path, &warnings) == -1,
+           "malformed v2 playback checkpoint is rejected");
+
+    screen_registry_cleanup(&registry);
+    screen_registry_cleanup(&loaded);
+    remove_persistence_artifacts(path);
+    remove_persistence_artifacts(invalid_path);
     return 1;
 }
 
@@ -4505,12 +4656,20 @@ static int test_renderer_registration_callback_and_lifetime(void)
            "screen destruction removes renderer and releases final owner");
     EXPECT(screen->tiles[0].map_id_valid && screen->tiles[0].map_id == 777,
            "runtime destruction preserves persistent screen map identity");
-    EXPECT(map_render_init_screen(&context, screen, &creator) ==
+    g_fake_create_map_calls = 0;
+    g_fake_get_map_calls = 0;
+    screen->tiles[0].map_id_valid = 0;
+    EXPECT(map_render_restore_screen(&context, screen, &creator) !=
+               MAP_RENDER_OK && !screen->tiles_initialized &&
+               g_fake_get_map_calls == 0 && g_fake_create_map_calls == 0,
+           "restore rejects a missing map id without map lookup or creation");
+    screen->tiles[0].map_id_valid = 1;
+    EXPECT(map_render_restore_screen(&context, screen, &creator) ==
                MAP_RENDER_OK,
-           "restart resolves the persistent MapView");
-    EXPECT(g_fake_create_map_calls == 1 && g_fake_get_map_calls == 1 &&
+           "restore resolves the persistent MapView");
+    EXPECT(g_fake_create_map_calls == 0 && g_fake_get_map_calls == 1 &&
                g_fake_get_map_requested_id == 777,
-           "restart reuses stored map id instead of allocating a new map");
+           "restore reuses stored map id instead of allocating a new map");
     map_render_destroy_screen(&context, screen);
     screen_registry_cleanup(&registry);
     return 1;
@@ -5974,6 +6133,7 @@ int main(int argc, char **argv)
     RUN_TEST(test_clock_normal_20fps);
     RUN_TEST(test_clock_skip_frames);
     RUN_TEST(test_clock_pause_resume);
+    RUN_TEST(test_session_restore_checkpoint);
     RUN_TEST(test_clock_single_play);
     RUN_TEST(test_clock_infinite_loop);
     RUN_TEST(test_clock_multi_loop);
@@ -6004,6 +6164,7 @@ int main(int argc, char **argv)
 
     printf("\n[Persistence]\n");
     RUN_TEST(test_persistence_roundtrip);
+    RUN_TEST(test_persistence_playback_checkpoint);
     RUN_TEST(test_persistence_omits_and_ignores_viewers);
     RUN_TEST(test_persistence_facing_range);
     RUN_TEST(test_managed_map_identity_roundtrip);

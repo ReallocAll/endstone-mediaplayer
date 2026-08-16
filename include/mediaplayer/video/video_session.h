@@ -76,6 +76,14 @@ void video_engine_release(struct video_engine *eng,
 int video_session_start(struct video_session *s, const char *video_path,
                         int loop, uint64_t screen_runtime_id, int64_t now_ms);
 
+// Starts playback at a persisted frame and loop position.  The checkpoint
+// values are validated against the opened video before the session becomes
+// active.
+int video_session_restore(struct video_session *s, const char *video_path,
+                          int loop_total, int loop_current,
+                          uint32_t frame, uint64_t screen_runtime_id,
+                          int64_t now_ms);
+
 // Stops playback and releases resources.
 void video_session_stop(struct video_session *s);
 

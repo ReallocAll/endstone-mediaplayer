@@ -881,6 +881,40 @@ static int add_bool(cJSON *object, const char *key, int value)
     return cJSON_AddBoolToObject(object, key, value != 0) ? 0 : -1;
 }
 
+static int add_playback(cJSON *screen,
+                        const struct screen_playback_checkpoint *playback)
+{
+    if (!screen || !playback)
+        return -1;
+    if (playback->state == SCREEN_PLAYBACK_STOPPED)
+        return 0;
+    if ((playback->state != SCREEN_PLAYBACK_PLAYING &&
+         playback->state != SCREEN_PLAYBACK_PAUSED) ||
+        !playback->video_name[0] ||
+        playback->loop_total < -1 || playback->loop_total == 0 ||
+        playback->loop_current < 1 ||
+        (playback->loop_total > 0 &&
+         playback->loop_current > playback->loop_total))
+        return -1;
+
+    cJSON *value = cJSON_CreateObject();
+    if (!value)
+        return -1;
+    const char *state = playback->state == SCREEN_PLAYBACK_PAUSED
+                            ? "paused"
+                            : "playing";
+    if (add_string(value, "state", state) != 0 ||
+        add_string(value, "video", playback->video_name) != 0 ||
+        add_number(value, "current_frame", playback->current_frame) != 0 ||
+        add_number(value, "loop_total", playback->loop_total) != 0 ||
+        add_number(value, "loop_current", playback->loop_current) != 0 ||
+        !cJSON_AddItemToObject(screen, "playback", value)) {
+        cJSON_Delete(value);
+        return -1;
+    }
+    return 0;
+}
+
 static int add_i64_string(cJSON *object, const char *key, int64_t value)
 {
     char text[32];
@@ -976,6 +1010,11 @@ static int build_manifest(const struct screen_registry *reg,
         }
         corner2 = nullptr;
         if (add_i64_string(screen, "created_at", entry->created_at) != 0) {
+            cJSON_Delete(screen);
+            cJSON_Delete(root);
+            return -1;
+        }
+        if (add_playback(screen, &entry->playback) != 0) {
             cJSON_Delete(screen);
             cJSON_Delete(root);
             return -1;
@@ -1214,6 +1253,47 @@ static int get_v2_sidecar_name(const cJSON *root, const char **name)
     return 0;
 }
 
+static int parse_playback(const cJSON *screen,
+                          struct screen_playback_checkpoint *out)
+{
+    if (!screen || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+
+    cJSON *value = cJSON_GetObjectItemCaseSensitive(screen, "playback");
+    if (!value)
+        return 0;
+    if (!cJSON_IsObject(value))
+        return -1;
+
+    cJSON *state = cJSON_GetObjectItemCaseSensitive(value, "state");
+    cJSON *video = cJSON_GetObjectItemCaseSensitive(value, "video");
+    if (!video)
+        video = cJSON_GetObjectItemCaseSensitive(value, "video_name");
+    cJSON *frame = cJSON_GetObjectItemCaseSensitive(value, "current_frame");
+    cJSON *loop_total = cJSON_GetObjectItemCaseSensitive(value, "loop_total");
+    cJSON *loop_current =
+        cJSON_GetObjectItemCaseSensitive(value, "loop_current");
+    if (!cJSON_IsString(state) || !cJSON_IsString(video) ||
+        !video->valuestring[0] ||
+        strlen(video->valuestring) >= SCREEN_PLAYBACK_VIDEO_NAME_MAX ||
+        parse_u32_json(frame, &out->current_frame) != 0 ||
+        parse_int_json(loop_total, &out->loop_total) != 0 ||
+        parse_int_json(loop_current, &out->loop_current) != 0 ||
+        out->loop_current < 1 || out->loop_total < -1 ||
+        out->loop_total == 0 ||
+        (out->loop_total > 0 && out->loop_current > out->loop_total))
+        return -1;
+    if (strcmp(state->valuestring, "playing") == 0)
+        out->state = SCREEN_PLAYBACK_PLAYING;
+    else if (strcmp(state->valuestring, "paused") == 0)
+        out->state = SCREEN_PLAYBACK_PAUSED;
+    else
+        return -1;
+    memcpy(out->video_name, video->valuestring, strlen(video->valuestring) + 1);
+    return 0;
+}
+
 int screen_persistence_load(struct screen_registry *reg, const char *path,
                             int *warnings)
 {
@@ -1436,6 +1516,19 @@ int screen_persistence_load(struct screen_registry *reg, const char *path,
             continue;
         }
         struct screen_entry *entry = loaded.screens[index];
+
+        if (version_value == 2) {
+            if (parse_playback(screen, &entry->playback) != 0) {
+                if (sidecar_fp)
+                    fclose(sidecar_fp);
+                free(sidecar_path);
+                cJSON_Delete(root);
+                screen_registry_cleanup(&loaded);
+                return load_reject(path, warnings,
+                                   "invalid v2 playback checkpoint");
+            }
+            entry->playing = entry->playback.state != SCREEN_PLAYBACK_STOPPED;
+        }
 
         cJSON *created = cJSON_GetObjectItemCaseSensitive(screen, "created_at");
         if (created) {

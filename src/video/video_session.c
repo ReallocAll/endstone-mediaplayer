@@ -107,6 +107,69 @@ int video_session_start(struct video_session *s, const char *video_path,
     return 0;
 }
 
+static int64_t restore_start_time(int64_t now_ms, uint64_t absolute_frame,
+                                  double frame_duration_ms)
+{
+    if (!isfinite(frame_duration_ms) || frame_duration_ms <= 0.0)
+        frame_duration_ms = 50.0;
+
+    long double elapsed = (long double)absolute_frame *
+                          (long double)frame_duration_ms;
+    if (!isfinite((double)elapsed) ||
+        elapsed >= (long double)INT64_MAX)
+        elapsed = (long double)INT64_MAX;
+    int64_t offset = (int64_t)elapsed;
+    if (offset <= 0)
+        return now_ms;
+
+    // Saturate rather than allowing now_ms - offset to wrap.
+    if (now_ms < INT64_MIN + offset)
+        return INT64_MIN;
+    return now_ms - offset;
+}
+
+int video_session_restore(struct video_session *s, const char *video_path,
+                          int loop_total, int loop_current,
+                          uint32_t frame, uint64_t screen_runtime_id,
+                          int64_t now_ms)
+{
+    if (!s || !video_path || !video_path[0] ||
+        (loop_total != -1 && loop_total <= 0) || loop_current < 1)
+        return -1;
+
+    if (video_session_start(s, video_path, loop_total, screen_runtime_id,
+                            now_ms) != 0)
+        return -1;
+
+    if (frame >= s->frame_count ||
+        (loop_total != -1 && loop_current > loop_total)) {
+        video_session_stop(s);
+        return -1;
+    }
+
+    uint64_t loop_index = (uint64_t)(loop_current - 1);
+    if (loop_index > UINT64_MAX / (uint64_t)s->frame_count) {
+        video_session_stop(s);
+        return -1;
+    }
+    uint64_t absolute_frame = loop_index * (uint64_t)s->frame_count;
+    if (absolute_frame > UINT64_MAX - (uint64_t)frame) {
+        video_session_stop(s);
+        return -1;
+    }
+    absolute_frame += (uint64_t)frame;
+
+    s->current_frame = frame;
+    s->loop_current = loop_current;
+    s->start_ms = restore_start_time(now_ms, absolute_frame,
+                                     s->frame_duration_ms);
+    if (video_session_load_frame(s, frame) != 0) {
+        video_session_stop(s);
+        return -1;
+    }
+    return 0;
+}
+
 void video_session_stop(struct video_session *s)
 {
     if (!s->active)

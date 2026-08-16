@@ -9,6 +9,7 @@
 #define SCREEN_NAME_MAX 64
 #define SCREEN_UUID_LEN 36
 #define SCREEN_MATERIALIZED_MAX_TILES 4096
+#define SCREEN_PLAYBACK_VIDEO_NAME_MAX 128
 
 enum screen_error {
     SCREEN_OK = 0,
@@ -33,6 +34,20 @@ struct screen_tile_rt {
 
 };
 
+enum screen_playback_state {
+    SCREEN_PLAYBACK_STOPPED = 0,
+    SCREEN_PLAYBACK_PLAYING,
+    SCREEN_PLAYBACK_PAUSED,
+};
+
+struct screen_playback_checkpoint {
+    enum screen_playback_state state;
+    char video_name[SCREEN_PLAYBACK_VIDEO_NAME_MAX];
+    uint32_t current_frame;
+    int loop_total;
+    int loop_current;
+};
+
 struct screen_entry {
     char name[SCREEN_NAME_MAX];
     char owner_uuid[SCREEN_UUID_LEN + 1];
@@ -52,6 +67,7 @@ struct screen_entry {
     int tiles_initialized;
 
     int playing;
+    struct screen_playback_checkpoint playback;
 };
 
 #define SCREEN_REGISTRY_MAX 64

@@ -209,6 +209,8 @@ static void stop_screen_state(struct screen_entry *screen)
     screen_audio_stop(&g_provider_ctx->audio, screen->runtime_id);
     video_engine_release(&g_provider_ctx->engine, screen->runtime_id);
     mps_source_release(&g_provider_ctx->image_engine, screen->runtime_id);
+    memset(&screen->playback, 0, sizeof(screen->playback));
+    screen->playback.state = SCREEN_PLAYBACK_STOPPED;
     screen->playing = 0;
 }
 

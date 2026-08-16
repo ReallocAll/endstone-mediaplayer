@@ -166,15 +166,19 @@ static int read_string_vector(const void *vec, const char **out, int max)
 //  Event handlers
 // =====================================================================
 
+static void register_player(void *player)
+{
+    if (!player) return;
+    music_on_player_join(&g_music_ctx, player);
+    char uid[SCREEN_UUID_LEN + 1];
+    if (es_player_uuid_string(player, uid))
+        video_on_player_join(&g_video_ctx, player, uid);
+}
+
 static void on_player_join(void *event)
 {
     void *player = *(void **)((char *)event + ES_PLAYER_EVENT_OFF_PLAYER);
-    if (player) {
-        music_on_player_join(&g_music_ctx, player);
-        char uid[SCREEN_UUID_LEN + 1];
-        if (es_player_uuid_string(player, uid))
-            video_on_player_join(&g_video_ctx, player, uid);
-    }
+    register_player(player);
 }
 static void on_player_quit(void *event)
 {
@@ -325,6 +329,16 @@ static void plugin_on_enable(void *self)
                           (void *)on_player_join, ES_PRIORITY_NORMAL);
     plugin_register_event(self, "PlayerQuitEvent",
                           (void *)on_player_quit, ES_PRIORITY_NORMAL);
+
+    // PlayerJoinEvent is not replayed for players who remain connected across
+    // /reload, so seed both media contexts from the server's live roster.
+    void *online_players[64];
+    int online_count = server_get_online_players(
+        server, online_players,
+        (int)(sizeof(online_players) / sizeof(online_players[0])));
+    for (int i = 0; i < online_count; i++)
+        register_player(online_players[i]);
+
     scheduler_register_tick(self);
 }
 

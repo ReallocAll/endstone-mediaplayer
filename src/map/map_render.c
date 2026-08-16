@@ -449,6 +449,39 @@ enum map_render_error map_render_init_screen(struct map_render_ctx *ctx,
 #endif
 }
 
+enum map_render_error map_render_restore_screen(struct map_render_ctx *ctx,
+                                                struct screen_entry *screen,
+                                                void *player)
+{
+#if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
+    if (!ctx || !screen || !player) {
+        return MAP_RENDER_ERR_INIT;
+    }
+    if (screen->tiles_initialized) {
+        return MAP_RENDER_OK;
+    }
+    if (!screen->tiles) {
+        return MAP_RENDER_ERR_INIT;
+    }
+
+    int tile_count = screen_geom_tile_count(&screen->geom);
+    if (tile_count <= 0 || screen->tiles_capacity < (size_t)tile_count) {
+        return MAP_RENDER_ERR_INIT;
+    }
+    for (int i = 0; i < tile_count; i++) {
+        if (!screen->tiles[i].map_id_valid) {
+            return MAP_RENDER_ERR_INIT;
+        }
+    }
+    return map_render_init_screen(ctx, screen, player);
+#else
+    (void)ctx;
+    (void)screen;
+    (void)player;
+    return MAP_RENDER_ERR_UNSUPPORTED;
+#endif
+}
+
 void map_render_destroy_screen(struct map_render_ctx *ctx,
                                struct screen_entry *screen)
 {

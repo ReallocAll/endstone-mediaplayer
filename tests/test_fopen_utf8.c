@@ -2,10 +2,53 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #include "mediaplayer/endstone_api.h"
 
 void *g_plugin = nullptr;
+
+static void *g_online_player_values[] = {
+    (void *)(uintptr_t)0x1111,
+    (void *)(uintptr_t)0x2222,
+    (void *)(uintptr_t)0x3333,
+};
+
+#if ES_PLATFORM_LINUX
+static void fake_get_online_players(void *out, void *server)
+#else
+static void *fake_get_online_players(void *server, void *out)
+#endif
+{
+    (void)server;
+    void **allocation = malloc(sizeof(g_online_player_values));
+    if (allocation)
+        memcpy(allocation, g_online_player_values,
+               sizeof(g_online_player_values));
+    void **storage = out;
+    storage[0] = allocation;
+    storage[1] = allocation
+                     ? allocation + sizeof(g_online_player_values) /
+                                        sizeof(g_online_player_values[0])
+                     : nullptr;
+    storage[2] = storage[1];
+#if !ES_PLATFORM_LINUX
+    return out;
+#endif
+}
+
+static int test_online_player_enumeration(void)
+{
+    void *vtable[ES_SERVER_SLOT_GET_ONLINE_PLAYERS + 1] = {0};
+    vtable[ES_SERVER_SLOT_GET_ONLINE_PLAYERS] =
+        (void *)fake_get_online_players;
+    void **server = vtable;
+    void *players[2] = {0};
+    int count = server_get_online_players(&server, players, 2);
+    return count == 2 && players[0] == g_online_player_values[0] &&
+           players[1] == g_online_player_values[1] &&
+           server_get_online_players(nullptr, players, 2) == -1;
+}
 
 static int test_valid_utf8_path(void)
 {
@@ -52,7 +95,9 @@ static int test_fixed_buffers_are_not_truncated(void)
 
 int main(void)
 {
-    if (!test_null_arguments() || !test_valid_utf8_path()) return 1;
+    if (!test_null_arguments() || !test_valid_utf8_path() ||
+        !test_online_player_enumeration())
+        return 1;
 #if defined(_WIN32)
     if (!test_invalid_utf8_is_rejected() ||
         !test_fixed_buffers_are_not_truncated()) return 1;
