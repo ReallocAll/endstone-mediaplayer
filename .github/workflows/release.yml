@@ -41,6 +41,11 @@ on:
         required: false
         default: ''
         type: string
+      abi_run_id:
+        description: 'Successful endstone-mediaplayer-abi workflow run ID (optional; tags auto-discover one)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   prepare:
@@ -115,8 +120,47 @@ jobs:
           echo "$desc" >> "$GITHUB_OUTPUT"
           echo "$delimiter" >> "$GITHUB_OUTPUT"
 
+  abi-proof:
+    name: Verify matching runtime ABI proof
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Test ABI proof verifier
+        run: python -m unittest tests.test_verify_abi_release -v
+
+      - name: Resolve and verify exact ABI artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.ABI_ARTIFACT_TOKEN }}
+          MEDIA_PLAYER_COMMIT: ${{ github.sha }}
+          ABI_RUN_ID: ${{ inputs.abi_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::ABI_ARTIFACT_TOKEN is required with Actions read access to ReallocAll/endstone-mediaplayer-abi"
+            exit 1
+          fi
+          args=(
+            --media-player-commit "$MEDIA_PLAYER_COMMIT"
+            --repository ReallocAll/endstone-mediaplayer-abi
+          )
+          if [[ -n "${ABI_RUN_ID:-}" ]]; then
+            args+=(--abi-run-id "$ABI_RUN_ID")
+          fi
+          python tools/verify_abi_release.py "${args[@]}"
+
   build-win:
-    needs: prepare
+    needs: [prepare, abi-proof]
     runs-on: windows-latest
     steps:
       - name: Checkout code
@@ -176,7 +220,7 @@ jobs:
           retention-days: 1
 
   build-linux:
-    needs: prepare
+    needs: [prepare, abi-proof]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
@@ -285,7 +329,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [prepare, build-win, build-linux, build-python]
+    needs: [prepare, abi-proof, build-win, build-linux, build-python]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
