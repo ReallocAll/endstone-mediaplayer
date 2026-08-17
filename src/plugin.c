@@ -16,6 +16,12 @@
 #include <string.h>
 #include <stdio.h>
 
+static_assert(ES_PLUGIN_OFF_DESCRIPTION + ES_DESCRIPTION_SIZE <=
+                  ES_PLUGIN_IMPL_SIZE,
+              "PluginDescription exceeds synthetic plugin allocation");
+static_assert(ES_PLUGIN_OFF_DESCRIPTION % ES_DESCRIPTION_ALIGN == 0,
+              "PluginDescription is misaligned in synthetic plugin");
+
 // =====================================================================
 //  Plugin vtable
 // =====================================================================
@@ -55,6 +61,8 @@ static void *g_vtable[ES_VTABLE_SLOT_COUNT] = {
     cpp_string_construct((desc) + (off), (value))
 #define DESC_VECTOR(desc, off, esize) \
     cpp_vector_construct((desc) + (off), (esize), nullptr)
+#define DESC_EMPTY_VECTOR(desc, off) \
+    cpp_vector_construct((desc) + (off), 0, nullptr)
 
 static void description_init(char *desc)
 {
@@ -75,11 +83,15 @@ static void description_init(char *desc)
     DESC_VECTOR(desc, ES_DESC_OFF_SOFT_DEPEND,   ES_STRING_SIZE);
     DESC_VECTOR(desc, ES_DESC_OFF_LOAD_BEFORE,   ES_STRING_SIZE);
     DESC_VECTOR(desc, ES_DESC_OFF_COMMANDS,      ES_COMMAND_SIZE);
-    DESC_VECTOR(desc, ES_DESC_OFF_PERMISSIONS,   ES_PERMISSION_SIZE);
+    // The permissions vector is always empty. Its constructor does not
+    // materialize an element, so no Permission stride is part of this
+    // consumer contract.
+    DESC_EMPTY_VECTOR(desc, ES_DESC_OFF_PERMISSIONS);
 }
 
 #undef DESC_STRING
 #undef DESC_VECTOR
+#undef DESC_EMPTY_VECTOR
 
 static void description_destroy(char *desc)
 {
