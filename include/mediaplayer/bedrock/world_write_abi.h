@@ -6,47 +6,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct es_identifier {
-    const char *ns;
-    size_t ns_len;
-    const char *key;
-    size_t key_len;
-};
-
-static_assert(sizeof(struct es_identifier) == 32,
-              "measured Identifier size mismatch");
-
-#define ES_ITEM_META_TYPE_MAP 3
 #define ES_BLOCK_STATE_WHICH_BOOL 0
 #define ES_BLOCK_STATE_WHICH_STRING 1
 #define ES_BLOCK_STATE_WHICH_INT 2
 
-struct es_optional_string {
-    _Alignas(8) unsigned char value[ES_STRING_SIZE];
-    uint8_t has_value;
-    uint8_t padding[
-        ES_OPTIONAL_STRING_SIZE - ES_STRING_SIZE - sizeof(uint8_t)];
-};
-
-static_assert(sizeof(struct es_optional_string) == ES_OPTIONAL_STRING_SIZE,
-              "measured optional<string> size mismatch");
-static_assert(offsetof(struct es_optional_string, has_value) ==
-                  ES_OPTIONAL_STRING_OFF_HAS_VALUE,
-              "measured optional<string> engaged flag offset mismatch");
-
 struct es_optional_item_stack {
-    void *impl;
-    uint8_t has_value;
-    uint8_t padding[
-        ES_OPTIONAL_ITEM_STACK_SIZE - sizeof(void *) - sizeof(uint8_t)];
+    _Alignas(ES_OPTIONAL_ITEM_STACK_ALIGN)
+        unsigned char bytes[ES_OPTIONAL_ITEM_STACK_SIZE];
 };
 
 static_assert(sizeof(struct es_optional_item_stack) ==
                   ES_OPTIONAL_ITEM_STACK_SIZE,
               "measured optional<ItemStack> size mismatch");
-static_assert(offsetof(struct es_optional_item_stack, has_value) ==
-                  ES_OPTIONAL_ITEM_STACK_OFF_HAS_VALUE,
-              "measured optional<ItemStack> engaged flag offset mismatch");
 
 #if defined(ES_PLATFORM_WINDOWS)
 
@@ -143,6 +114,11 @@ static_assert(offsetof(struct es_block_states, buckets) ==
                   ES_BLOCK_STATES_OFF_MAX_LOAD_FACTOR,
               "measured BlockStates field offsets mismatch");
 
+#endif
+
+#if defined(MP_TESTING)
+bool mp_world_test_item_frame_roundtrip(void *block, void *item_impl,
+                                        int64_t expected_map_id);
 #endif
 
 #endif

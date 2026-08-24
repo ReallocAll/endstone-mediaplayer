@@ -39,6 +39,7 @@
 #include "mediaplayer/api_provider.h"
 #include "endstone_mediaplayer_api.h"
 #include "endstone_abi.h"
+#include "abi_helpers.h"
 #include <cppcompat/string.h>
 #include "cJSON.h"
 #include "miniz.h"
@@ -3664,15 +3665,6 @@ static int g_fake_get_map_calls;
 static uint32_t g_fake_rendered_pixel;
 static int g_fake_render_send_count;
 static int g_fake_map_locked;
-static void *g_fake_probe_block;
-static void *g_fake_probe_actor;
-static int g_fake_probe_x;
-static int g_fake_probe_y;
-static int g_fake_probe_z;
-static int g_fake_probe_actor_x;
-static int g_fake_probe_actor_y;
-static int g_fake_probe_actor_z;
-static unsigned int g_fake_probe_delete_flags;
 
 static void fake_send_map(void *self, void *map)
 {
@@ -3707,32 +3699,6 @@ static void *fake_get_unique_id(void *self, unsigned char *output)
     return output;
 }
 
-static void *fake_dimension_get_block(void *self, void **output,
-                                      int x, int y, int z)
-{
-    (void)self;
-    g_fake_probe_x = x;
-    g_fake_probe_y = y;
-    g_fake_probe_z = z;
-    *output = g_fake_probe_block;
-    return output;
-}
-
-static void *fake_block_source_get_actor(void *self, const int *position)
-{
-    (void)self;
-    g_fake_probe_actor_x = position[0];
-    g_fake_probe_actor_y = position[1];
-    g_fake_probe_actor_z = position[2];
-    return g_fake_probe_actor;
-}
-
-static void fake_block_delete(void *self, unsigned int flags)
-{
-    (void)self;
-    g_fake_probe_delete_flags = flags;
-}
-
 static void *fake_create_map(void *self, void *dimension)
 {
     (void)self;
@@ -3761,26 +3727,28 @@ static void fake_set_locked(void *self, bool locked)
     g_fake_map_locked = locked;
 }
 
-static void fake_map_add_renderer(void *self, struct es_msvc_shared_ptr *shared)
+static void fake_map_add_renderer(void *self, struct es_shared_handle *shared)
 {
-    g_fake_renderer = shared->ptr;
-    g_fake_renderer_control = shared->control;
-    es_msvc_shared_ptr_add_ref(shared); // renderers_ copy
-    es_msvc_shared_ptr_add_ref(shared); // canvases_ key copy
-    void **renderer_vtable = *(void ***)shared->ptr;
+    g_fake_renderer = es_shared_object(shared);
+    g_fake_renderer_control = es_shared_control(shared);
+    es_shared_add_ref(shared); // renderers_ copy
+    es_shared_add_ref(shared); // canvases_ key copy
+    void **renderer_vtable = *(void ***)g_fake_renderer;
     ((void (*)(void *, void *))renderer_vtable[ES_MAPRENDERER_SLOT_INIT])(
-        shared->ptr, self);
-    es_msvc_shared_ptr_release(shared); // destroy by-value parameter
+        g_fake_renderer, self);
+    es_shared_release(shared); // destroy by-value parameter
 }
 
 static bool fake_map_remove_renderer(void *self,
-                                     const struct es_msvc_shared_ptr *shared)
+                                     const struct es_shared_handle *shared)
 {
     (void)self;
-    struct es_msvc_shared_ptr renderers_copy = *shared;
-    struct es_msvc_shared_ptr canvases_copy = *shared;
-    es_msvc_shared_ptr_release(&renderers_copy);
-    es_msvc_shared_ptr_release(&canvases_copy);
+    struct es_shared_handle renderers_copy = {0};
+    struct es_shared_handle canvases_copy = {0};
+    es_shared_copy(&renderers_copy, shared);
+    es_shared_copy(&canvases_copy, shared);
+    es_shared_release(&renderers_copy);
+    es_shared_release(&canvases_copy);
     g_fake_renderer = nullptr;
     g_fake_renderer_control = nullptr;
     return true;
@@ -3798,9 +3766,13 @@ static void fake_player_send_rendered_map(void *self, void *map)
     } canvas = { nullptr, pixels, pixels + SCREEN_TILE_SIZE * SCREEN_TILE_SIZE,
                  pixels + SCREEN_TILE_SIZE * SCREEN_TILE_SIZE };
     void **renderer_vtable = *(void ***)g_fake_renderer;
+    unsigned char player_handle[
+        ES_NOTNULL_PLAYER_OFF_SHARED_PTR + ES_SHARED_PTR_SIZE] = {0};
+    es_shared_init(player_handle + ES_NOTNULL_PLAYER_OFF_SHARED_PTR,
+                   self, nullptr);
     ((void (*)(void *, void *, void *, void *))
         renderer_vtable[ES_MAPRENDERER_SLOT_RENDER])(
-            g_fake_renderer, map, &canvas, self);
+            g_fake_renderer, map, &canvas, player_handle);
     g_fake_rendered_pixel = pixels[0];
 }
 
@@ -3819,72 +3791,36 @@ static int test_map_abi_dispatch(void)
 
     void *map_vtable[ES_MAPVIEW_SLOT_ADD_RENDERER + 1] = {0};
     struct { void **vtable; } map = { map_vtable };
-    struct es_msvc_shared_ptr shared = { &map_object, &player };
+    struct es_shared_handle shared = {0};
+    es_shared_init(&shared, &map_object, &player);
     map_vtable[ES_MAPVIEW_SLOT_ADD_RENDERER] = (void *)fake_add_renderer;
     g_fake_shared_argument = nullptr;
     es_map_view_add_renderer(&map, &shared);
     EXPECT(g_fake_shared_argument == &shared,
            "addRenderer wrapper passes address of 16-byte by-value parameter");
 
-    struct {
-        void **primary_vtable;
-        void **offline_vtable;
-    } endstone_player = {0};
-    void *offline_vtable[ES_OFFLINE_PLAYER_SLOT_GET_UNIQUE_ID + 1] = {0};
-    offline_vtable[ES_OFFLINE_PLAYER_SLOT_GET_UNIQUE_ID] =
+    void *identity_vtable[ES_PLAYER_SLOT_GET_UNIQUE_ID + 1] = {0};
+    struct { void **vtable; } endstone_player = {identity_vtable};
+    identity_vtable[ES_PLAYER_SLOT_GET_UNIQUE_ID] =
         (void *)fake_get_unique_id;
-    endstone_player.offline_vtable = offline_vtable;
     char uuid[37];
     g_fake_uuid_this = nullptr;
     EXPECT(es_player_uuid_string(&endstone_player, uuid),
-           "UUID wrapper succeeds for measured OfflinePlayer subobject");
-    EXPECT(g_fake_uuid_this == &endstone_player.offline_vtable,
-           "UUID wrapper applies +8 secondary-base this adjustment");
+            "UUID wrapper succeeds through the measured Player slot");
+    EXPECT(g_fake_uuid_this == &endstone_player,
+            "UUID wrapper uses the primary Player object in Endstone 0.12");
     EXPECT(strcmp(uuid, "00010203-0405-0607-0809-0a0b0c0d0e0f") == 0,
            "UUID wrapper formats canonical persistent identity");
 
-    void *dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1] = {0};
-    struct { void **vtable; } dimension = {dimension_vtable};
-    dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ] =
-        (void *)fake_dimension_get_block;
-
-    void *source_vtable[ES_BLOCK_SOURCE_SLOT_GET_BLOCK_ENTITY + 1] = {0};
-    struct { void **vtable; } source = {source_vtable};
-    source_vtable[ES_BLOCK_SOURCE_SLOT_GET_BLOCK_ENTITY] =
-        (void *)fake_block_source_get_actor;
-
-    void *block_vtable[] = {(void *)fake_block_delete};
-    struct {
-        void **vtable;
-        void *block_source;
-    } block = {block_vtable, &source};
-
-    void *actor_vtable[] = {(void *)fake_destroy};
-    struct { void **vtable; } actor = {actor_vtable};
-
-    g_fake_probe_block = &block;
-    g_fake_probe_actor = &actor;
-    g_fake_probe_delete_flags = 0;
+    struct { void **vtable; } dimension = {nullptr};
     struct es_block_actor_probe probe;
-    EXPECT(es_probe_block_actor(&dimension, 126, 111, 161, &probe),
-           "read-only BlockActor probe resolves a block entity");
-    EXPECT(g_fake_probe_x == 126 && g_fake_probe_y == 111 &&
-               g_fake_probe_z == 161,
-           "Dimension hidden-return wrapper preserves x/y/z arguments");
-    EXPECT(g_fake_probe_actor_x == 126 && g_fake_probe_actor_y == 111 &&
-               g_fake_probe_actor_z == 161,
-           "BlockSource probe receives the requested BlockPos by reference");
-    EXPECT(probe.block_found && probe.block_actor_found &&
-               probe.block_actor == &actor,
-           "BlockActor probe reports safe object-presence diagnostics");
-    EXPECT(probe.block_actor_vptr == actor_vtable,
-           "BlockActor probe captures only the primary runtime vptr");
-    EXPECT(g_fake_probe_delete_flags == 1,
-           "temporary EndstoneBlock uses scalar deleting destructor");
+    EXPECT(!es_probe_block_actor(&dimension, 126, 111, 161, &probe) &&
+               !probe.block_found && !probe.block_actor_found,
+            "retired 0.11 BlockActor probe fails closed on Endstone 0.12");
     return 1;
 }
 
-static int test_msvc_shared_ptr_release_contract(void)
+static int test_shared_handle_release_contract(void)
 {
     void *control_vtable[] = { (void *)fake_destroy, (void *)fake_delete };
     struct {
@@ -3893,583 +3829,65 @@ static int test_msvc_shared_ptr_release_contract(void)
         int weaks;
     } control = { control_vtable, 1, 1 };
     int object;
-    struct es_msvc_shared_ptr shared = { &object, &control };
+    struct es_shared_handle shared = {0};
+    es_shared_init(&shared, &object, &control);
     g_fake_destroy_count = 0;
     g_fake_delete_count = 0;
-    es_msvc_shared_ptr_release(&shared);
+    es_shared_release(&shared);
     EXPECT(g_fake_destroy_count == 1, "last strong reference calls _Destroy");
     EXPECT(g_fake_delete_count == 1, "last weak reference calls _Delete_this");
-    EXPECT(shared.ptr == nullptr && shared.control == nullptr,
+    EXPECT(es_shared_object(&shared) == nullptr &&
+               es_shared_control(&shared) == nullptr,
            "released shared_ptr storage is cleared");
     return 1;
 }
 
-// ----------------------------------------------------------------
-// Stateful fake write-world.  Backs both the renderer lifetime test (which
-// needs a resolvable fake Player for the pure-C map creation path) and the
-// Pure-C World Write ABI tests below.  Every object mimics the measured
-// MSVC layouts: hidden return buffers, scalar deleting destructors with
-// flag 1, consumed 16-byte optional<ItemStack> parameters and the fake
-// BlockStates list shape.
-// ----------------------------------------------------------------
 
-#define FAKE_WW_INV_SIZE 6
-#define FAKE_WW_CELLS 4
-
-struct fake_ww_server { void **vtable; };
-struct fake_ww_map_view { void **vtable; };
-struct fake_ww_registry { void **vtable; };
-struct fake_ww_item_type { void **vtable; };
-
-struct fake_ww_cell {
-    struct screen_pos pos;
-    char type[48];
-};
-
-struct fake_ww_world { // serves as the Endstone Dimension object
+struct fake_creator_dimension { void **vtable; };
+struct fake_creator_player {
     void **vtable;
-    struct fake_ww_cell cells[FAKE_WW_CELLS];
-    int cell_count;
-    int set_data_calls;
-    void *last_set_data;
-    int last_physics;
-    int set_data_applies;
+    struct fake_creator_dimension *dimension;
 };
 
-struct fake_ww_block {
-    void **vtable;
-    struct fake_ww_world *world; // +8: read as the block_source diagnostic
-    struct fake_ww_cell *cell;
-};
-
-struct fake_ww_block_data {
-    void **vtable;
-    char type[32];
-    int facing;
-};
-
-struct fake_ww_item_impl {
-    void **vtable;
-    int64_t map_id;
-    int has_map_id;
-};
-
-struct fake_ww_item_meta {
-    void **vtable;
-    int type;
-    int has_map_id;
-    int64_t map_id;
-    void *map_view;
-};
-
-struct fake_ww_inventory {
-    void **vtable;
-    int occupied[FAKE_WW_INV_SIZE];
-    int64_t map_id[FAKE_WW_INV_SIZE];
-    int clear_calls;
-    int last_cleared;
-    int drop_set_item_at; // slot whose setItem silently fails, or -1
-};
-
-struct fake_ww_player {
-    void **vtable;
-    struct fake_ww_world *world;
-    struct fake_ww_inventory *inventory;
-};
-
-static void *g_ww_server_vtable[ES_SERVER_SLOT_GET_REGISTRY + 1];
-static void *g_ww_registry_vtable[ES_ITEM_REGISTRY_SLOT_GET + 1];
-static void *g_ww_item_type_vtable[ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK + 1];
-static void *g_ww_impl_vtable[ES_ITEM_STACK_SLOT_SET_ITEM_META + 1];
-static void *g_ww_meta_vtable[ES_MAP_META_SLOT_SET_MAP_VIEW + 1];
-static void *g_ww_inventory_vtable[ES_INVENTORY_SLOT_CLEAR_SLOT + 1];
-static void *g_ww_player_vtable[ES_PLAYER_SLOT_GET_INVENTORY + 1];
-static void *g_ww_dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1];
-static void *g_ww_block_vtable[ES_BLOCK_SLOT_SET_DATA + 1];
-static void *g_ww_block_data_vtable[1];
-static void *g_ww_map_view_vtable[ES_MAPVIEW_SLOT_GET_ID + 1];
-
-static struct fake_ww_registry g_ww_registry;
-static struct fake_ww_item_type g_ww_item_type;
-
-static int g_ww_block_live;
-static int g_ww_block_data_live;
-static int g_ww_impl_live;
-static int g_ww_meta_live;
-static int g_ww_bad_delete_flags;
-static int g_ww_set_lore_calls;
-static int g_ww_clear_all_calls;
-static int g_ww_create_states_calls;
-static int g_ww_create_air_calls;
-static int g_ww_states_shape_ok;
-static int g_ww_states_facing;
-static char g_ww_states_type[48];
-static int g_ww_registry_identifier_ok;
-static int g_ww_registry_missing;
-static int g_ww_create_stack_amount;
-static int g_ww_set_item_meta_result;
-static int g_ww_meta_type;
-static int64_t g_ww_map_view_id;
-static int g_ww_set_item_bad_param;
-static char g_ww_last_display_name[192];
-
-static void *fake_ww_get_location(void *self, struct es_location *out)
+static void *fake_creator_location(void *self, struct es_location *out)
 {
-    struct fake_ww_player *player = self;
+    struct fake_creator_player *player = self;
     memset(out, 0, sizeof(*out));
-    out->dimension = player->world;
-    out->x = 0.5f;
-    out->y = 64.0f;
-    out->z = 0.5f;
+    es_store_pointer(out->bytes + ES_LOCATION_OFF_DIMENSION,
+                     ES_WEAK_PTR_OFF_OBJECT, player->dimension);
     return out;
 }
 
-static void *fake_ww_get_dimension(void *self)
+static void *fake_creator_get_dimension(void *self, void *out)
 {
-    return ((struct fake_ww_player *)self)->world;
-}
-
-static void *fake_ww_get_inventory(void *self)
-{
-    return ((struct fake_ww_player *)self)->inventory;
-}
-
-static void *fake_ww_dimension_get_name(void *self, void *out)
-{
-    (void)self;
-    cpp_string_construct(out, "minecraft:overworld");
+    struct fake_creator_player *player = self;
+    es_shared_init(out, player->dimension, nullptr);
     return out;
 }
 
-static struct fake_ww_cell *fake_ww_find_cell(struct fake_ww_world *world,
-                                              int x, int y, int z)
+static void *fake_creator_dimension_id(void *self, void *out)
 {
-    for (int i = 0; i < world->cell_count; i++) {
-        if (world->cells[i].pos.x == x && world->cells[i].pos.y == y &&
-            world->cells[i].pos.z == z) {
-            return &world->cells[i];
-        }
-    }
-    return nullptr;
-}
-
-static void *fake_ww_get_block(void *self, void **out, int x, int y, int z)
-{
-    struct fake_ww_world *world = self;
-    struct fake_ww_cell *cell = fake_ww_find_cell(world, x, y, z);
-    *out = nullptr;
-    if (!cell) return out;
-    struct fake_ww_block *block = calloc(1, sizeof(*block));
-    block->vtable = g_ww_block_vtable;
-    block->world = world;
-    block->cell = cell;
-    g_ww_block_live++;
-    *out = block;
+    (void)self;
+    es_identifier_init(out, "minecraft:overworld");
     return out;
 }
 
-static void fake_ww_block_delete(void *self, unsigned int flags)
+static void setup_fake_creator(struct fake_creator_player *player,
+                               struct fake_creator_dimension *dimension)
 {
-    if (flags != 1) g_ww_bad_delete_flags++;
-    g_ww_block_live--;
-    free(self);
-}
-
-static void *fake_ww_block_get_type(void *self, void *out)
-{
-    struct fake_ww_block *block = self;
-    cpp_string_construct(out, block->cell->type);
-    return out;
-}
-
-static void fake_ww_block_set_data(void *self, void *block_data, bool physics)
-{
-    struct fake_ww_block *block = self;
-    struct fake_ww_block_data *data = block_data;
-    block->world->set_data_calls++;
-    block->world->last_set_data = block_data;
-    block->world->last_physics = physics;
-    if (block->world->set_data_applies) {
-        snprintf(block->cell->type, sizeof(block->cell->type), "%s",
-                 data->type);
-    }
-}
-
-static void fake_ww_block_data_delete(void *self, unsigned int flags)
-{
-    if (flags != 1) g_ww_bad_delete_flags++;
-    g_ww_block_data_live--;
-    free(self);
-}
-
-static struct fake_ww_block_data *fake_ww_new_block_data(const char *type,
-                                                         int facing)
-{
-    struct fake_ww_block_data *data = calloc(1, sizeof(*data));
-    data->vtable = g_ww_block_data_vtable;
-    snprintf(data->type, sizeof(data->type), "%s", type);
-    data->facing = facing;
-    g_ww_block_data_live++;
-    return data;
-}
-
-static void *fake_ww_create_block_data_states(void *self, void **out,
-                                              void *type_string,
-                                              void *states_ptr)
-{
-    (void)self;
-    g_ww_create_states_calls++;
-    snprintf(g_ww_states_type, sizeof(g_ww_states_type), "%s",
-             cpp_string_str(type_string));
-    struct es_block_states *states = states_ptr;
-    struct es_block_state_node *sentinel = states->head;
-    struct es_block_state_node *node =
-        sentinel && sentinel->next != sentinel ? sentinel->next : nullptr;
-    int shape_ok = states->max_load_factor == 1.0f && states->size == 1 &&
-                   !states->vec_first && !states->vec_last &&
-                   !states->vec_end && states->mask == 7 &&
-                   states->maxidx == 8 && node && node != sentinel;
-    if (node) {
-        // The 16-char key must be a real heap string: _Mysize 16, _Myres 31.
-        shape_ok = shape_ok && node->next == sentinel &&
-                   node->prev == sentinel && sentinel->prev == node &&
-                   node->variant_index == ES_BLOCK_STATE_WHICH_INT &&
-                   strcmp(cpp_string_str(node->key), "facing_direction") == 0 &&
-                   *(size_t *)(node->key + 16) == 16 &&
-                   *(size_t *)(node->key + 24) == 31;
-        g_ww_states_facing = *(int32_t *)node->variant_storage;
-        // Emulate the callee-destroys contract with the shared heap.
-        cpp_string_destroy(node->key);
-        free(node);
-    }
-    free(sentinel);
-    cpp_string_destroy(type_string); // SSO type id: no-op
-    g_ww_states_shape_ok = shape_ok;
-    *out = fake_ww_new_block_data(g_ww_states_type, g_ww_states_facing);
-    return out;
-}
-
-static void *fake_ww_create_block_data_air(void *self, void **out,
-                                           void *type_string)
-{
-    (void)self;
-    g_ww_create_air_calls++;
-    int is_air = strcmp(cpp_string_str(type_string), "minecraft:air") == 0;
-    cpp_string_destroy(type_string);
-    *out = fake_ww_new_block_data(is_air ? "minecraft:air" : "minecraft:bad",
-                                  -1);
-    return out;
-}
-
-static void *fake_ww_get_registry(void *self, void *name_string)
-{
-    (void)self;
-    if (strcmp(cpp_string_str(name_string), "ItemType") != 0) return nullptr;
-    return g_ww_registry_missing ? nullptr : &g_ww_registry;
-}
-
-static void *fake_ww_registry_get(void *self, struct es_identifier *identifier)
-{
-    (void)self;
-    g_ww_registry_identifier_ok =
-        identifier && identifier->ns_len == 9 && identifier->key_len == 10 &&
-        memcmp(identifier->ns, "minecraft", 9) == 0 &&
-        memcmp(identifier->key, "filled_map", 10) == 0;
-    return g_ww_registry_identifier_ok ? (void *)&g_ww_item_type : nullptr;
-}
-
-static void fake_ww_impl_delete(void *self, unsigned int flags)
-{
-    if (flags != 1) g_ww_bad_delete_flags++;
-    g_ww_impl_live--;
-    free(self);
-}
-
-static struct fake_ww_item_impl *fake_ww_new_impl(int64_t map_id,
-                                                  int has_map_id)
-{
-    struct fake_ww_item_impl *impl = calloc(1, sizeof(*impl));
-    impl->vtable = g_ww_impl_vtable;
-    impl->map_id = map_id;
-    impl->has_map_id = has_map_id;
-    g_ww_impl_live++;
-    return impl;
-}
-
-static void *fake_ww_create_item_stack(void *self, void **out, int amount)
-{
-    (void)self;
-    g_ww_create_stack_amount = amount;
-    *out = fake_ww_new_impl(-1, 0);
-    return out;
-}
-
-static void *fake_ww_impl_get_meta(void *self, void **out)
-{
-    struct fake_ww_item_impl *impl = self;
-    struct fake_ww_item_meta *meta = calloc(1, sizeof(*meta));
-    meta->vtable = g_ww_meta_vtable;
-    meta->type = g_ww_meta_type;
-    meta->has_map_id = impl->has_map_id;
-    meta->map_id = impl->map_id;
-    g_ww_meta_live++;
-    *out = meta;
-    return out;
-}
-
-static bool fake_ww_impl_set_meta(void *self, const void *meta_ptr)
-{
-    struct fake_ww_item_impl *impl = self;
-    const struct fake_ww_item_meta *meta = meta_ptr;
-    if (!g_ww_set_item_meta_result) return false;
-    impl->has_map_id = meta->has_map_id;
-    impl->map_id = meta->map_id;
-    return true;
-}
-
-static void fake_ww_meta_delete(void *self, unsigned int flags)
-{
-    if (flags != 1) g_ww_bad_delete_flags++;
-    g_ww_meta_live--;
-    free(self);
-}
-
-static int fake_ww_meta_get_type(void *self)
-{
-    return ((struct fake_ww_item_meta *)self)->type;
-}
-
-static void fake_ww_meta_set_display_name(void *self, void *optional_ptr)
-{
-    (void)self;
-    struct es_optional_string *parameter = optional_ptr;
-    if (!parameter->has_value) return;
-    snprintf(g_ww_last_display_name, sizeof(g_ww_last_display_name), "%s",
-             cpp_string_str(parameter->value));
-    // Emulate callee destruction of the by-value optional; for a >15 char
-    // name this frees the caller's heap buffer through the shared heap.
-    cpp_string_destroy(parameter->value);
-    parameter->has_value = 0;
-}
-
-static void fake_ww_meta_set_lore(void *self, void *optional_ptr)
-{
-    (void)self;
-    (void)optional_ptr;
-    g_ww_set_lore_calls++;
-}
-
-static bool fake_ww_meta_has_map_id(void *self)
-{
-    return ((struct fake_ww_item_meta *)self)->has_map_id != 0;
-}
-
-static int64_t fake_ww_meta_get_map_id(void *self)
-{
-    return ((struct fake_ww_item_meta *)self)->map_id;
-}
-
-static int64_t fake_ww_map_view_get_id(void *self)
-{
-    (void)self;
-    return g_ww_map_view_id;
-}
-
-static void fake_ww_meta_set_map_view(void *self, const void *map_view)
-{
-    struct fake_ww_item_meta *meta = self;
-    meta->map_view = (void *)map_view;
-    if (map_view) {
-        // The measured setMapView reads MapView slot 1 getId internally.
-        meta->map_id = ((int64_t (*)(void *))(
-                            (*(void ***)map_view)[ES_MAPVIEW_SLOT_GET_ID]))(
-                            (void *)map_view);
-        meta->has_map_id = 1;
-    }
-}
-
-static int fake_ww_inv_get_size(void *self)
-{
-    (void)self;
-    return FAKE_WW_INV_SIZE;
-}
-
-static void *fake_ww_inv_get_item(void *self, void *out_ptr, int slot)
-{
-    struct fake_ww_inventory *inventory = self;
-    struct es_optional_item_stack *out = out_ptr;
-    if (slot < 0 || slot >= FAKE_WW_INV_SIZE || !inventory->occupied[slot]) {
-        // The impl field is GARBAGE when the optional is empty; production
-        // code crashes this test if it ever dereferences it.
-        out->impl = (void *)(uintptr_t)0xDEADDEAD;
-        out->has_value = 0;
-        return out;
-    }
-    out->impl = fake_ww_new_impl(inventory->map_id[slot],
-                                 inventory->map_id[slot] >= 0);
-    out->has_value = 1;
-    return out;
-}
-
-static void fake_ww_inv_set_item(void *self, int slot, void *param_ptr)
-{
-    struct fake_ww_inventory *inventory = self;
-    struct es_optional_item_stack *parameter = param_ptr;
-    if (!parameter->has_value || !parameter->impl) {
-        g_ww_set_item_bad_param = 1;
-        return;
-    }
-    struct fake_ww_item_impl *impl = parameter->impl;
-    if (slot >= 0 && slot < FAKE_WW_INV_SIZE &&
-        slot != inventory->drop_set_item_at) {
-        inventory->occupied[slot] = 1;
-        inventory->map_id[slot] = impl->has_map_id ? impl->map_id : -1;
-    }
-    // The callee consumes the by-value optional: the impl is moved into the
-    // inventory and the caller's field is nulled.
-    fake_ww_impl_delete(impl, 1);
-    parameter->impl = nullptr;
-    parameter->has_value = 0;
-}
-
-static void fake_ww_inv_clear_all(void *self)
-{
-    (void)self;
-    g_ww_clear_all_calls++;
-}
-
-static void fake_ww_inv_clear_slot(void *self, int slot)
-{
-    struct fake_ww_inventory *inventory = self;
-    inventory->clear_calls++;
-    inventory->last_cleared = slot;
-    if (slot >= 0 && slot < FAKE_WW_INV_SIZE) {
-        inventory->occupied[slot] = 0;
-        inventory->map_id[slot] = -1;
-    }
-}
-
-static void setup_fake_write_world(struct fake_ww_server *server,
-                                   struct fake_ww_player *player,
-                                   struct fake_ww_world *world,
-                                   struct fake_ww_inventory *inventory,
-                                   struct fake_ww_map_view *map_view)
-{
-    memset(g_ww_server_vtable, 0, sizeof(g_ww_server_vtable));
-    memset(g_ww_registry_vtable, 0, sizeof(g_ww_registry_vtable));
-    memset(g_ww_item_type_vtable, 0, sizeof(g_ww_item_type_vtable));
-    memset(g_ww_impl_vtable, 0, sizeof(g_ww_impl_vtable));
-    memset(g_ww_meta_vtable, 0, sizeof(g_ww_meta_vtable));
-    memset(g_ww_inventory_vtable, 0, sizeof(g_ww_inventory_vtable));
-    memset(g_ww_player_vtable, 0, sizeof(g_ww_player_vtable));
-    memset(g_ww_dimension_vtable, 0, sizeof(g_ww_dimension_vtable));
-    memset(g_ww_block_vtable, 0, sizeof(g_ww_block_vtable));
-    memset(g_ww_map_view_vtable, 0, sizeof(g_ww_map_view_vtable));
-
-    g_ww_server_vtable[ES_SERVER_SLOT_CREATE_BLOCK_DATA_STATES] =
-        (void *)fake_ww_create_block_data_states;
-    g_ww_server_vtable[ES_SERVER_SLOT_CREATE_BLOCK_DATA] =
-        (void *)fake_ww_create_block_data_air;
-    g_ww_server_vtable[ES_SERVER_SLOT_GET_REGISTRY] =
-        (void *)fake_ww_get_registry;
-    g_ww_registry_vtable[ES_ITEM_REGISTRY_SLOT_GET] =
-        (void *)fake_ww_registry_get;
-    g_ww_item_type_vtable[ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK] =
-        (void *)fake_ww_create_item_stack;
-    g_ww_impl_vtable[ES_ITEM_STACK_SLOT_DELETE] = (void *)fake_ww_impl_delete;
-    g_ww_impl_vtable[ES_ITEM_STACK_SLOT_GET_ITEM_META] =
-        (void *)fake_ww_impl_get_meta;
-    g_ww_impl_vtable[ES_ITEM_STACK_SLOT_SET_ITEM_META] =
-        (void *)fake_ww_impl_set_meta;
-    g_ww_meta_vtable[ES_ITEM_META_SLOT_DELETE] = (void *)fake_ww_meta_delete;
-    g_ww_meta_vtable[ES_ITEM_META_SLOT_GET_TYPE] =
-        (void *)fake_ww_meta_get_type;
-    g_ww_meta_vtable[ES_ITEM_META_SLOT_SET_DISPLAY_NAME] =
-        (void *)fake_ww_meta_set_display_name;
-    g_ww_meta_vtable[ES_ITEM_META_SLOT_SET_LORE] =
-        (void *)fake_ww_meta_set_lore;
-    g_ww_meta_vtable[ES_MAP_META_SLOT_HAS_MAP_ID] =
-        (void *)fake_ww_meta_has_map_id;
-    g_ww_meta_vtable[ES_MAP_META_SLOT_GET_MAP_ID] =
-        (void *)fake_ww_meta_get_map_id;
-    g_ww_meta_vtable[ES_MAP_META_SLOT_SET_MAP_VIEW] =
-        (void *)fake_ww_meta_set_map_view;
-    g_ww_inventory_vtable[ES_INVENTORY_SLOT_GET_SIZE] =
-        (void *)fake_ww_inv_get_size;
-    g_ww_inventory_vtable[ES_INVENTORY_SLOT_GET_ITEM] =
-        (void *)fake_ww_inv_get_item;
-    g_ww_inventory_vtable[ES_INVENTORY_SLOT_SET_ITEM] =
-        (void *)fake_ww_inv_set_item;
-    g_ww_inventory_vtable[ES_INVENTORY_SLOT_CLEAR_ALL] =
-        (void *)fake_ww_inv_clear_all;
-    g_ww_inventory_vtable[ES_INVENTORY_SLOT_CLEAR_SLOT] =
-        (void *)fake_ww_inv_clear_slot;
-    g_ww_player_vtable[ES_PLAYER_SLOT_GET_LOCATION] =
-        (void *)fake_ww_get_location;
-    g_ww_player_vtable[ES_PLAYER_SLOT_GET_DIMENSION] =
-        (void *)fake_ww_get_dimension;
-    g_ww_player_vtable[ES_PLAYER_SLOT_GET_INVENTORY] =
-        (void *)fake_ww_get_inventory;
-    g_ww_dimension_vtable[ES_DIMENSION_SLOT_GET_NAME] =
-        (void *)fake_ww_dimension_get_name;
-    g_ww_dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ] =
-        (void *)fake_ww_get_block;
-    g_ww_block_vtable[0] = (void *)fake_ww_block_delete;
-    g_ww_block_vtable[ES_BLOCK_SLOT_GET_TYPE] =
-        (void *)fake_ww_block_get_type;
-    g_ww_block_vtable[ES_BLOCK_SLOT_SET_DATA] =
-        (void *)fake_ww_block_set_data;
-    g_ww_block_data_vtable[ES_BLOCK_DATA_SLOT_DELETE] =
-        (void *)fake_ww_block_data_delete;
-    g_ww_map_view_vtable[ES_MAPVIEW_SLOT_GET_ID] =
-        (void *)fake_ww_map_view_get_id;
-
-    g_ww_registry.vtable = g_ww_registry_vtable;
-    g_ww_item_type.vtable = g_ww_item_type_vtable;
-
-    g_ww_block_live = 0;
-    g_ww_block_data_live = 0;
-    g_ww_impl_live = 0;
-    g_ww_meta_live = 0;
-    g_ww_bad_delete_flags = 0;
-    g_ww_set_lore_calls = 0;
-    g_ww_clear_all_calls = 0;
-    g_ww_create_states_calls = 0;
-    g_ww_create_air_calls = 0;
-    g_ww_states_shape_ok = 0;
-    g_ww_states_facing = -1;
-    g_ww_states_type[0] = '\0';
-    g_ww_registry_identifier_ok = 0;
-    g_ww_registry_missing = 0;
-    g_ww_create_stack_amount = 0;
-    g_ww_set_item_meta_result = 1;
-    g_ww_meta_type = ES_ITEM_META_TYPE_MAP;
-    g_ww_map_view_id = 0;
-    g_ww_set_item_bad_param = 0;
-    g_ww_last_display_name[0] = '\0';
-
-    memset(world, 0, sizeof(*world));
-    world->vtable = g_ww_dimension_vtable;
-    world->cell_count = 4;
-    world->cells[0] = (struct fake_ww_cell){{0, 64, 0}, "minecraft:air"};
-    world->cells[1] =
-        (struct fake_ww_cell){{0, 64, 1}, "minecraft:quartz_block"};
-    world->cells[2] = (struct fake_ww_cell){{1, 64, 0}, "minecraft:air"};
-    world->cells[3] =
-        (struct fake_ww_cell){{1, 64, 1}, "minecraft:quartz_block"};
-    world->set_data_applies = 1;
-
-    memset(inventory, 0, sizeof(*inventory));
-    inventory->vtable = g_ww_inventory_vtable;
-    inventory->drop_set_item_at = -1;
-    for (int i = 0; i < FAKE_WW_INV_SIZE; i++) inventory->map_id[i] = -1;
-
-    player->vtable = g_ww_player_vtable;
-    player->world = world;
-    player->inventory = inventory;
-
-    server->vtable = g_ww_server_vtable;
-    map_view->vtable = g_ww_map_view_vtable;
+    static void *player_vtable[ES_PLAYER_SLOT_GET_DIMENSION + 1];
+    static void *dimension_vtable[ES_DIMENSION_SLOT_GET_ID + 1];
+    memset(player_vtable, 0, sizeof(player_vtable));
+    memset(dimension_vtable, 0, sizeof(dimension_vtable));
+    player_vtable[ES_PLAYER_SLOT_GET_LOCATION] =
+        (void *)fake_creator_location;
+    player_vtable[ES_PLAYER_SLOT_GET_DIMENSION] =
+        (void *)fake_creator_get_dimension;
+    dimension_vtable[ES_DIMENSION_SLOT_GET_ID] =
+        (void *)fake_creator_dimension_id;
+    dimension->vtable = dimension_vtable;
+    player->vtable = player_vtable;
+    player->dimension = dimension;
 }
 
 static struct presenter_viewer test_presenter_viewer(
@@ -4518,13 +3936,9 @@ static int test_renderer_registration_callback_and_lifetime(void)
     // The pure-C map creation path resolves the creator's world through the
     // measured Player/Dimension slots, so a resolvable fake player is
     // required (the old C++ bridge test used an opaque dummy pointer).
-    struct fake_ww_server ww_server;
-    struct fake_ww_player creator;
-    struct fake_ww_world ww_world;
-    struct fake_ww_inventory ww_inventory;
-    struct fake_ww_map_view ww_view;
-    setup_fake_write_world(&ww_server, &creator, &ww_world, &ww_inventory,
-                           &ww_view);
+    struct fake_creator_player creator;
+    struct fake_creator_dimension creator_dimension;
+    setup_fake_creator(&creator, &creator_dimension);
 
     struct map_render_ctx context;
     map_render_init(&context, &server, nullptr);
@@ -4684,7 +4098,7 @@ static int test_renderer_registration_callback_and_lifetime(void)
 
 struct fake_multi_map {
     void **vtable;
-    struct es_msvc_shared_ptr renderer;
+    struct es_shared_handle renderer;
     int64_t id;
     int send_count;
     uint32_t first_pixel;
@@ -4710,28 +4124,30 @@ static int64_t fake_multi_get_id(void *self)
 }
 
 static void fake_multi_add_renderer(void *self,
-                                    struct es_msvc_shared_ptr *shared)
+                                    struct es_shared_handle *shared)
 {
     struct fake_multi_map *map = self;
-    map->renderer = *shared;
-    es_msvc_shared_ptr_add_ref(shared); // renderers_ copy
-    es_msvc_shared_ptr_add_ref(shared); // canvases_ key copy
-    void **renderer_vtable = *(void ***)shared->ptr;
+    memcpy(&map->renderer, shared, sizeof(map->renderer));
+    es_shared_add_ref(shared); // renderers_ copy
+    es_shared_add_ref(shared); // canvases_ key copy
+    void *renderer = es_shared_object(shared);
+    void **renderer_vtable = *(void ***)renderer;
     ((void (*)(void *, void *))renderer_vtable[ES_MAPRENDERER_SLOT_INIT])(
-        shared->ptr, self);
-    es_msvc_shared_ptr_release(shared); // destroy by-value parameter
+        renderer, self);
+    es_shared_release(shared); // destroy by-value parameter
 }
 
 static bool fake_multi_remove_renderer(void *self,
-                                       const struct es_msvc_shared_ptr *shared)
+                                       const struct es_shared_handle *shared)
 {
     struct fake_multi_map *map = self;
-    struct es_msvc_shared_ptr renderers_copy = *shared;
-    struct es_msvc_shared_ptr canvases_copy = *shared;
-    es_msvc_shared_ptr_release(&renderers_copy);
-    es_msvc_shared_ptr_release(&canvases_copy);
-    map->renderer.ptr = nullptr;
-    map->renderer.control = nullptr;
+    struct es_shared_handle renderers_copy = {0};
+    struct es_shared_handle canvases_copy = {0};
+    es_shared_copy(&renderers_copy, shared);
+    es_shared_copy(&canvases_copy, shared);
+    es_shared_release(&renderers_copy);
+    es_shared_release(&canvases_copy);
+    memset(&map->renderer, 0, sizeof(map->renderer));
     return true;
 }
 
@@ -4754,10 +4170,15 @@ static void fake_multi_send_map(void *self, void *map_object)
         uint32_t *capacity;
     } canvas = { nullptr, pixels, pixels + SCREEN_TILE_SIZE * SCREEN_TILE_SIZE,
                  pixels + SCREEN_TILE_SIZE * SCREEN_TILE_SIZE };
-    void **renderer_vtable = *(void ***)map->renderer.ptr;
+    void *renderer = es_shared_object(&map->renderer);
+    void **renderer_vtable = *(void ***)renderer;
+    unsigned char player_handle[
+        ES_NOTNULL_PLAYER_OFF_SHARED_PTR + ES_SHARED_PTR_SIZE] = {0};
+    es_shared_init(player_handle + ES_NOTNULL_PLAYER_OFF_SHARED_PTR,
+                   self, nullptr);
     ((void (*)(void *, void *, void *, void *))
         renderer_vtable[ES_MAPRENDERER_SLOT_RENDER])(
-            map->renderer.ptr, map_object, &canvas, self);
+            renderer, map_object, &canvas, player_handle);
     map->first_pixel = pixels[0];
 }
 
@@ -4796,13 +4217,9 @@ static int test_render_multi_tile_dirty_tracking(void)
         g_multi_maps[i].vtable = map_vtable;
     }
 
-    struct fake_ww_server ww_server;
-    struct fake_ww_player creator;
-    struct fake_ww_world ww_world;
-    struct fake_ww_inventory ww_inventory;
-    struct fake_ww_map_view ww_view;
-    setup_fake_write_world(&ww_server, &creator, &ww_world, &ww_inventory,
-                           &ww_view);
+    struct fake_creator_player creator;
+    struct fake_creator_dimension creator_dimension;
+    setup_fake_creator(&creator, &creator_dimension);
 
     struct map_render_ctx context;
     map_render_init(&context, &server, nullptr);
@@ -4974,757 +4391,151 @@ static int test_render_multi_tile_dirty_tracking(void)
     return 1;
 }
 
-struct fake_world_block {
+
+
+struct fake_auto_item_type { void **vtable; };
+struct fake_auto_item_meta { void **vtable; int64_t map_id; };
+struct fake_auto_item_impl {
     void **vtable;
-    void *block_source;
-    const char *type;
+    struct fake_auto_item_type *type;
+    int64_t map_id;
 };
-
-struct fake_world_dimension {
+struct fake_auto_frame {
     void **vtable;
-    struct fake_world_block *air;
-    struct fake_world_block *support;
-    struct fake_world_block *frame;
+    int64_t map_id;
+    int set_calls;
+    int get_calls;
+    int64_t read_delta;
 };
+struct fake_auto_block { void **vtable; struct fake_auto_frame *frame; };
 
-struct fake_world_player {
-    void **vtable;
-    struct fake_world_dimension *dimension;
-};
+static void *g_auto_impl_vtable[ES_ITEM_STACK_SLOT_SET_ITEM_META + 1];
+static void *g_auto_type_vtable[ES_ITEM_TYPE_SLOT_CREATE_ITEM_STACK + 1];
+static void *g_auto_meta_vtable[ES_MAP_META_SLOT_SET_MAP_VIEW + 1];
+static int g_auto_bad_delete;
 
-static void *g_world_location_this;
-static void *g_world_location_out;
-static void *g_world_dimension_this;
-static void *g_world_name_this;
-static void *g_world_name_out;
-static void *g_world_block_this;
-static void *g_world_block_out;
-static void *g_world_type_this;
-static void *g_world_type_out;
-static int g_world_block_delete_count;
-static unsigned int g_world_block_delete_flags;
-
-static void *fake_world_get_location(void *self, struct es_location *out)
+static void fake_auto_impl_delete(void *self, unsigned int flags)
 {
-    struct fake_world_player *player = self;
-    g_world_location_this = self;
-    g_world_location_out = out;
-    memset(out, 0, sizeof(*out));
-    out->dimension = player->dimension;
-    out->x = 10.75f;
-    out->y = 64.25f;
-    out->z = -2.25f;
-    out->pitch = 12.5f;
-    out->yaw = -90.0f;
-    return out;
+    if (flags != 1) g_auto_bad_delete = 1;
+    free(self);
 }
 
-static void *fake_world_get_dimension(void *self)
+static void *fake_auto_impl_get_type(void *self)
 {
-    g_world_dimension_this = self;
-    return ((struct fake_world_player *)self)->dimension;
+    return ((struct fake_auto_item_impl *)self)->type;
 }
 
-static void *fake_world_get_name(void *self, void *out)
-{
-    g_world_name_this = self;
-    g_world_name_out = out;
-    cpp_string_construct(out, "minecraft:overworld");
-    return out;
-}
-
-static void *fake_world_get_block(void *self, void **out,
-                                  int x, int y, int z)
-{
-    struct fake_world_dimension *dimension = self;
-    (void)y;
-    (void)z;
-    g_world_block_this = self;
-    g_world_block_out = out;
-    if (x == 20) *out = dimension->support;
-    else if (x == 30) *out = dimension->frame;
-    else *out = dimension->air;
-    return out;
-}
-
-static void *fake_world_get_type(void *self, void *out)
-{
-    struct fake_world_block *block = self;
-    g_world_type_this = self;
-    g_world_type_out = out;
-    cpp_string_construct(out, block->type);
-    return out;
-}
-
-static void fake_world_block_delete(void *self, unsigned int flags)
+static void *fake_auto_type_get_id(void *self, void *out)
 {
     (void)self;
-    g_world_block_delete_count++;
-    g_world_block_delete_flags = flags;
+    es_identifier_init(out, "minecraft:filled_map");
+    return out;
 }
 
-static void setup_fake_world(struct fake_world_player *player,
-                             struct fake_world_dimension *dimension,
-                             struct fake_world_block *air,
-                             struct fake_world_block *support,
-                             struct fake_world_block *frame,
-                             void **player_vtable, void **dimension_vtable,
-                             void **block_vtable, void *block_source)
+static void *fake_auto_impl_get_meta(void *self, void *out)
 {
-    memset(player_vtable, 0,
-           sizeof(void *) * (ES_PLAYER_SLOT_GET_DIMENSION + 1));
-    memset(dimension_vtable, 0,
-           sizeof(void *) * (ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1));
-    memset(block_vtable, 0,
-           sizeof(void *) * (ES_BLOCK_SLOT_GET_TYPE + 1));
-    player_vtable[ES_PLAYER_SLOT_GET_LOCATION] =
-        (void *)fake_world_get_location;
-    player_vtable[ES_PLAYER_SLOT_GET_DIMENSION] =
-        (void *)fake_world_get_dimension;
-    dimension_vtable[ES_DIMENSION_SLOT_GET_NAME] =
-        (void *)fake_world_get_name;
-    dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ] =
-        (void *)fake_world_get_block;
-    block_vtable[0] = (void *)fake_world_block_delete;
-    block_vtable[ES_BLOCK_SLOT_GET_TYPE] = (void *)fake_world_get_type;
-    *air = (struct fake_world_block){block_vtable, block_source,
-                                    "minecraft:air"};
-    *support = (struct fake_world_block){block_vtable, block_source,
-                                        "minecraft:quartz_block"};
-    *frame = (struct fake_world_block){block_vtable, block_source,
-                                      "minecraft:frame"};
-    *dimension = (struct fake_world_dimension){
-        dimension_vtable, air, support, frame};
-    *player = (struct fake_world_player){player_vtable, dimension};
+    static struct fake_auto_item_meta meta;
+    meta.vtable = g_auto_meta_vtable;
+    meta.map_id = ((struct fake_auto_item_impl *)self)->map_id;
+    es_shared_init(out, &meta, nullptr);
+    return out;
 }
 
-static int test_world_read_abi_snapshot_and_failure_safety(void)
+static bool fake_auto_meta_has_map_id(void *self)
 {
-    void *player_vtable[ES_PLAYER_SLOT_GET_DIMENSION + 1];
-    void *dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1];
-    void *block_vtable[ES_BLOCK_SLOT_GET_TYPE + 1];
-    void *source_vtable[] = {(void *)0x1};
-    struct { void **vtable; } source = {source_vtable};
-    struct fake_world_player player;
-    struct fake_world_dimension dimension;
-    struct fake_world_block air, support, frame;
-    setup_fake_world(&player, &dimension, &air, &support, &frame,
-                     player_vtable, dimension_vtable, block_vtable, &source);
+    (void)self;
+    return true;
+}
 
-    struct mp_player_snapshot snapshot;
-    struct mp_world_c_trace trace;
-    memset(&snapshot, 0xa5, sizeof(snapshot));
-    EXPECT(mp_world_c_debug_player_get_snapshot(&player, &snapshot, &trace,
-                                                nullptr, 0),
-           "pure-C snapshot dispatches measured world ABI");
-    EXPECT(g_world_location_this == &player &&
-               g_world_dimension_this == &player,
-           "snapshot virtuals receive the exact borrowed Player this pointer");
-    EXPECT(g_world_location_out != nullptr && g_world_name_out != nullptr &&
-               g_world_name_this == &dimension,
-           "hidden return buffers and Dimension this are supplied");
-    EXPECT(snapshot.x == 10.75f && snapshot.y == 64.25f &&
-               snapshot.z == -2.25f && snapshot.pitch == 12.5f &&
-               snapshot.yaw == -90.0f,
-           "Location POD fields use measured offsets");
-    EXPECT(snapshot.block_x == 10 && snapshot.block_y == 64 &&
-               snapshot.block_z == -3,
-           "negative and positive block coordinates use floor semantics");
-    EXPECT(strcmp(snapshot.dimension_id, "minecraft:overworld") == 0 &&
-               trace.dimension == &dimension,
-           "snapshot copies the dimension name and retains no C++ object");
-    struct mp_player_snapshot production_snapshot = {0};
-    EXPECT(mp_player_get_snapshot(&player, &production_snapshot, nullptr, 0) &&
-               memcmp(&production_snapshot, &snapshot, sizeof(snapshot)) == 0,
-           "production snapshot symbol uses the measured C implementation");
+static int64_t fake_auto_meta_get_map_id(void *self)
+{
+    return ((struct fake_auto_item_meta *)self)->map_id;
+}
 
-    memset(&snapshot, 0xa5, sizeof(snapshot));
-    memset(&trace, 0xa5, sizeof(trace));
-    EXPECT(!mp_world_c_debug_player_get_snapshot(nullptr, &snapshot, &trace,
-                                                 nullptr, 0),
-           "null Player fails closed");
-    struct mp_player_snapshot zero_snapshot = {0};
-    struct mp_world_c_trace zero_trace = {0};
-    EXPECT(memcmp(&snapshot, &zero_snapshot, sizeof(snapshot)) == 0 &&
-               memcmp(&trace, &zero_trace, sizeof(trace)) == 0,
-           "failure zeroes all snapshot and trace outputs");
-    EXPECT(player.vtable == player_vtable && dimension.vtable == dimension_vtable,
-           "borrowed Player and Dimension objects are not destroyed");
+static void fake_auto_frame_set_item(void *self, const void *optional_ptr)
+{
+    struct fake_auto_frame *frame = self;
+    const struct es_optional_item_stack *optional = optional_ptr;
+    frame->set_calls++;
+    if (!optional->bytes[ES_OPTIONAL_ITEM_STACK_OFF_HAS_VALUE]) return;
+    void *impl = es_pointer_at(
+        optional->bytes + ES_OPTIONAL_ITEM_STACK_OFF_VALUE,
+        ES_ITEM_STACK_OFF_IMPL);
+    if (impl) frame->map_id = ((struct fake_auto_item_impl *)impl)->map_id;
+}
+
+static void *fake_auto_frame_get_item(void *self, void *out_ptr)
+{
+    struct fake_auto_frame *frame = self;
+    struct es_optional_item_stack *out = out_ptr;
+    struct fake_auto_item_impl *copy = calloc(1, sizeof(*copy));
+    frame->get_calls++;
+    if (!copy) return out;
+    copy->vtable = g_auto_impl_vtable;
+    static struct fake_auto_item_type type;
+    type.vtable = g_auto_type_vtable;
+    copy->type = &type;
+    copy->map_id = frame->map_id + frame->read_delta;
+    es_store_pointer(out->bytes + ES_OPTIONAL_ITEM_STACK_OFF_VALUE,
+                     ES_ITEM_STACK_OFF_IMPL, copy);
+    out->bytes[ES_OPTIONAL_ITEM_STACK_OFF_HAS_VALUE] = 1;
+    return out;
+}
+
+static void *fake_auto_capture_state(void *self, void *out)
+{
+    struct fake_auto_block *block = self;
+    es_shared_init(out, block->frame, nullptr);
+    return out;
+}
+
+static int test_world_write_item_frame_roundtrip(void)
+{
+    void *block_vtable[ES_BLOCK_SLOT_CAPTURE_STATE + 1] = {0};
+    void *frame_vtable[ES_ITEM_FRAME_SLOT_SET_ITEM + 1] = {0};
+    memset(g_auto_impl_vtable, 0, sizeof(g_auto_impl_vtable));
+    memset(g_auto_type_vtable, 0, sizeof(g_auto_type_vtable));
+    memset(g_auto_meta_vtable, 0, sizeof(g_auto_meta_vtable));
+    block_vtable[ES_BLOCK_SLOT_CAPTURE_STATE] =
+        (void *)fake_auto_capture_state;
+    frame_vtable[ES_ITEM_FRAME_SLOT_GET_ITEM] =
+        (void *)fake_auto_frame_get_item;
+    frame_vtable[ES_ITEM_FRAME_SLOT_SET_ITEM] =
+        (void *)fake_auto_frame_set_item;
+    g_auto_impl_vtable[ES_ITEM_STACK_SLOT_DELETE] =
+        (void *)fake_auto_impl_delete;
+    g_auto_impl_vtable[ES_ITEM_STACK_SLOT_GET_TYPE] =
+        (void *)fake_auto_impl_get_type;
+    g_auto_impl_vtable[ES_ITEM_STACK_SLOT_GET_ITEM_META] =
+        (void *)fake_auto_impl_get_meta;
+    g_auto_type_vtable[ES_ITEM_TYPE_SLOT_GET_ID] =
+        (void *)fake_auto_type_get_id;
+    g_auto_meta_vtable[ES_MAP_META_SLOT_HAS_MAP_ID] =
+        (void *)fake_auto_meta_has_map_id;
+    g_auto_meta_vtable[ES_MAP_META_SLOT_GET_MAP_ID] =
+        (void *)fake_auto_meta_get_map_id;
+
+    struct fake_auto_item_type type = {g_auto_type_vtable};
+    struct fake_auto_item_impl item = {g_auto_impl_vtable, &type, 4242};
+    struct fake_auto_frame frame = {frame_vtable, -1, 0, 0, 0};
+    struct fake_auto_block block = {block_vtable, &frame};
+    g_auto_bad_delete = 0;
+    EXPECT(mp_world_test_item_frame_roundtrip(&block, &item, 4242),
+           "captureState/setItem/getItem installs and verifies the map id");
+    EXPECT(frame.set_calls == 1 && frame.get_calls == 1 &&
+               frame.map_id == 4242,
+           "automatic placement calls ItemFrame setItem and reads it back");
+
+    frame.read_delta = 1;
+    EXPECT(!mp_world_test_item_frame_roundtrip(&block, &item, 4242),
+           "a mismatched ItemFrame map id fails closed");
+    EXPECT(frame.set_calls == 2 && frame.get_calls == 2,
+           "mismatch validation still follows the measured state path");
+    EXPECT(!g_auto_bad_delete,
+           "ItemFrame getItem copies use the measured scalar delete contract");
     return 1;
 }
 
-static int test_world_read_abi_block_lifetime_and_policy(void)
-{
-    void *player_vtable[ES_PLAYER_SLOT_GET_DIMENSION + 1];
-    void *dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1];
-    void *block_vtable[ES_BLOCK_SLOT_GET_TYPE + 1];
-    void *source_vtable[] = {(void *)0x1};
-    struct { void **vtable; } source = {source_vtable};
-    struct fake_world_player player;
-    struct fake_world_dimension dimension;
-    struct fake_world_block air, support, frame;
-    setup_fake_world(&player, &dimension, &air, &support, &frame,
-                     player_vtable, dimension_vtable, block_vtable, &source);
-
-    g_world_block_delete_count = 0;
-    g_world_block_delete_flags = 0;
-    struct mp_world_block_probe probe;
-    struct mp_world_c_trace trace;
-    enum mp_world_result result = mp_world_c_debug_probe_block(
-        &player, "minecraft:overworld", (struct screen_pos){10, 64, 0},
-        &probe, &trace, nullptr, 0);
-    EXPECT(result == MP_WORLD_OK && probe.block_found && probe.is_air &&
-               !probe.support_candidate,
-           "air block is classified by the policy layer");
-    EXPECT(probe.block == nullptr && trace.block_address == &air,
-           "temporary Block never escapes while diagnostics retain its old address");
-    EXPECT(g_world_block_this == &dimension && g_world_block_out != nullptr &&
-               g_world_type_this == &air && g_world_type_out != nullptr,
-           "block and string hidden-return calls receive measured arguments");
-    EXPECT(g_world_block_delete_count == 1 &&
-               g_world_block_delete_flags == 1 &&
-               trace.block_destroy_count == 1,
-           "returned unique_ptr Block is scalar-deleted exactly once");
-    EXPECT(probe.block_source == &source &&
-               probe.block_source_vptr == source_vtable,
-           "verified EndstoneBlock +8 BlockSource field is reported");
-
-    struct mp_world_block_probe production_probe = {0};
-    result = mp_world_probe_block(
-        &player, "minecraft:overworld", (struct screen_pos){20, 64, 0},
-        &production_probe, nullptr, 0);
-    EXPECT(result == MP_WORLD_OK && production_probe.support_candidate &&
-               strcmp(production_probe.block_type,
-                      "minecraft:quartz_block") == 0 &&
-               g_world_block_delete_count == 2,
-           "production block-probe symbol uses C and destroys its temporary once");
-
-    result = mp_world_c_debug_probe_block(
-        &player, "minecraft:the_nether", (struct screen_pos){20, 64, 0},
-        &probe, &trace, nullptr, 0);
-    EXPECT(result == MP_WORLD_BAD_ARGUMENT && !probe.block_found &&
-               trace.block_destroy_count == 0,
-           "different dimension is rejected before block lookup");
-    EXPECT(mp_world_c_type_is_support_candidate("minecraft:quartz_block") &&
-               !mp_world_c_type_is_support_candidate("minecraft:water") &&
-               mp_world_c_type_is_air("minecraft:void_air"),
-           "air and backing policy remains independent of ABI dispatch");
-    return 1;
-}
-
-static int test_world_read_abi_validation_inspection_and_map_lookup(void)
-{
-    void *player_vtable[ES_PLAYER_SLOT_GET_DIMENSION + 1];
-    void *dimension_vtable[ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ + 1];
-    void *block_vtable[ES_BLOCK_SLOT_GET_TYPE + 1];
-    void *source_vtable[] = {(void *)0x1};
-    struct { void **vtable; } source = {source_vtable};
-    struct fake_world_player player;
-    struct fake_world_dimension dimension;
-    struct fake_world_block air, support, frame;
-    setup_fake_world(&player, &dimension, &air, &support, &frame,
-                     player_vtable, dimension_vtable, block_vtable, &source);
-
-    g_world_block_delete_count = 0;
-    EXPECT(mp_world_validate_empty_tile(
-               &player, "minecraft:overworld",
-               (struct screen_pos){10, 64, 0},
-               (struct screen_pos){20, 64, 0}, SCREEN_FACE_NORTH,
-               nullptr, 0) == MP_WORLD_OK,
-           "transaction validation accepts air plus a support candidate");
-    EXPECT(g_world_block_delete_count == 2,
-           "validation destroys both temporary Blocks exactly once");
-    EXPECT(mp_world_validate_empty_tile(
-               &player, "minecraft:overworld",
-               (struct screen_pos){20, 64, 0},
-               (struct screen_pos){20, 64, 0}, SCREEN_FACE_NORTH,
-               nullptr, 0) == MP_WORLD_CELL_NOT_AIR,
-           "validation rejects an occupied cell");
-    EXPECT(mp_world_validate_empty_tile(
-               &player, "minecraft:overworld",
-               (struct screen_pos){10, 64, 0},
-               (struct screen_pos){10, 64, 0}, SCREEN_FACE_NORTH,
-               nullptr, 0) == MP_WORLD_BACKING_NOT_SOLID,
-           "validation rejects an air backing block");
-
-    struct mp_world_tile_state state;
-    EXPECT(mp_world_inspect_tile(
-               &player, "minecraft:overworld",
-               (struct screen_pos){30, 64, 0},
-               (struct screen_pos){20, 64, 0}, 777, &state,
-               nullptr, 0) == MP_WORLD_MAP_ID_UNVERIFIABLE &&
-               state.frame_present && state.backing_is_solid,
-           "inspection matches C++ v0.11 frame/map-id semantics");
-
-    void *server_vtable[ES_SERVER_SLOT_GET_MAP + 1] = {0};
-    struct { void **vtable; } server = {server_vtable};
-    int map;
-    g_fake_map_view = &map;
-    g_fake_get_map_calls = 0;
-    g_fake_get_map_requested_id = 0;
-    server_vtable[ES_SERVER_SLOT_GET_MAP] = (void *)fake_server_get_map;
-    EXPECT(mp_world_get_map(&server, 1234567) == &map &&
-               g_fake_get_map_calls == 1 &&
-               g_fake_get_map_requested_id == 1234567,
-           "MapView lookup reuses the verified Server ABI adapter");
-    EXPECT(mp_world_get_map(nullptr, 1) == nullptr,
-           "MapView lookup rejects a null borrowed Server");
-    server_vtable[ES_SERVER_SLOT_GET_MAP] = nullptr;
-    EXPECT(mp_world_get_map(&server, 1) == nullptr,
-           "MapView lookup rejects a missing verified virtual target");
-    return 1;
-}
-
-// ================================================================
-// PURE-C WORLD WRITE ABI TESTS
-// ================================================================
-
-static int test_world_write_prepare_builds_frame_and_map_item(void)
-{
-    struct fake_ww_server server;
-    struct fake_ww_player player;
-    struct fake_ww_world world;
-    struct fake_ww_inventory inventory;
-    struct fake_ww_map_view map_view;
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 4242;
-
-    struct mp_world_prepared_tile *prepared = nullptr;
-    char detail[192] = {0};
-    enum mp_world_result result = mp_world_prepare_tile(
-        &server, &player, "minecraft:overworld",
-        (struct screen_pos){0, 64, 0}, (struct screen_pos){0, 64, 1},
-        SCREEN_FACE_NORTH, &map_view, 4242, "demo", 0, 2, 0, 0,
-        &prepared, detail, (int)sizeof(detail));
-    EXPECT(result == MP_WORLD_OK && prepared,
-           "prepare succeeds against the full fake write world");
-    EXPECT(g_ww_create_states_calls == 1 && g_ww_states_shape_ok,
-           "createBlockData receives the exact measured fake BlockStates shape");
-    EXPECT(strcmp(g_ww_states_type, "minecraft:frame") == 0 &&
-               g_ww_states_facing == 2,
-           "frame block data uses SSO type id and NORTH facing state 2");
-    EXPECT(g_ww_registry_identifier_ok && g_ww_create_stack_amount == 1,
-           "registry Identifier holds minecraft/filled_map string_views");
-    EXPECT(strcmp(g_ww_last_display_name,
-                  "MediaPlayer demo - tile 1/2 (row 1, col 1)") == 0,
-           "display name matches the C++ reference format");
-    EXPECT(g_ww_set_lore_calls == 0,
-           "setLore is deliberately never invoked by the pure-C path");
-    EXPECT(g_ww_meta_live == 0,
-           "prepare destroys its owned ItemMeta exactly once with flag 1");
-    EXPECT(g_ww_impl_live == 1 && g_ww_block_data_live == 1,
-           "prepared tile owns exactly one impl and one BlockData");
-    EXPECT(g_ww_block_live == 0,
-           "validation destroys every temporary Block");
-    EXPECT(g_ww_bad_delete_flags == 0, "all deletes used flag 1");
-
-    mp_world_prepared_destroy(prepared);
-    EXPECT(g_ww_impl_live == 0 && g_ww_block_data_live == 0 &&
-               g_ww_bad_delete_flags == 0,
-           "prepared_destroy scalar-deletes the impl and BlockData once each");
-
-    static const struct {
-        enum screen_facing facing;
-        int state;
-    } facing_cases[] = {
-        {SCREEN_FACE_NORTH, 2},
-        {SCREEN_FACE_SOUTH, 3},
-        {SCREEN_FACE_WEST, 4},
-        {SCREEN_FACE_EAST, 5},
-    };
-    for (int i = 0; i < 4; i++) {
-        prepared = nullptr;
-        result = mp_world_prepare_tile(
-            &server, &player, "minecraft:overworld",
-            (struct screen_pos){0, 64, 0}, (struct screen_pos){0, 64, 1},
-            facing_cases[i].facing, &map_view, 4242, "demo", 0, 1, 0, 0,
-            &prepared, nullptr, 0);
-        EXPECT(result == MP_WORLD_OK && prepared &&
-                   g_ww_states_facing == facing_cases[i].state,
-               "facing maps onto the measured facing_direction value");
-        mp_world_prepared_destroy(prepared);
-    }
-    EXPECT(g_ww_impl_live == 0 && g_ww_block_data_live == 0 &&
-               g_ww_block_live == 0,
-           "facing sweep leaks no fake runtime objects");
-    return 1;
-}
-
-static int test_world_write_prepare_failure_paths(void)
-{
-    struct fake_ww_server server;
-    struct fake_ww_player player;
-    struct fake_ww_world world;
-    struct fake_ww_inventory inventory;
-    struct fake_ww_map_view map_view;
-    struct mp_world_prepared_tile *prepared = nullptr;
-    char detail[192];
-    struct screen_pos cell = {0, 64, 0};
-    struct screen_pos backing = {0, 64, 1};
-
-    // Non-map meta: the getType()==3 downcast must reject and free all.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_meta_type = 0;
-    detail[0] = '\0';
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 7, "demo", 0, 1, 0, 0, &prepared, detail,
-                                 (int)sizeof(detail)) ==
-                   MP_WORLD_MAP_ITEM_FAILED &&
-               !prepared,
-           "non-map ItemMeta type fails the as<MapMeta> downcast");
-    EXPECT(g_ww_impl_live == 0 && g_ww_meta_live == 0 &&
-               g_ww_block_data_live == 0 && g_ww_bad_delete_flags == 0,
-           "downcast failure frees impl, meta and BlockData exactly once");
-
-    // Map id mismatch between the MapView and the requested id.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 777;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 888, "demo", 0, 1, 0, 0, &prepared,
-                                 nullptr, 0) == MP_WORLD_MAP_ID_MISMATCH,
-           "map id mismatch is detected before any placement");
-    EXPECT(g_ww_impl_live == 0 && g_ww_meta_live == 0 &&
-               g_ww_block_data_live == 0,
-           "map id mismatch leaks nothing");
-
-    // setItemMeta returning false is also a mismatch, as in C++.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 55;
-    g_ww_set_item_meta_result = 0;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 55, "demo", 0, 1, 0, 0, &prepared,
-                                 nullptr, 0) == MP_WORLD_MAP_ID_MISMATCH,
-           "rejected setItemMeta reports a map id mismatch");
-
-    // Missing ItemType registry.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_registry_missing = 1;
-    detail[0] = '\0';
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 7, "demo", 0, 1, 0, 0, &prepared, detail,
-                                 (int)sizeof(detail)) ==
-               MP_WORLD_MAP_ITEM_FAILED,
-           "missing registry fails map item creation");
-    EXPECT(strcmp(detail, "ItemType registry is unavailable") == 0 &&
-               g_ww_block_data_live == 0,
-           "registry failure reports its detail and frees the frame data");
-
-    // Occupied cell: validation runs before any block data creation.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    snprintf(world.cells[0].type, sizeof(world.cells[0].type),
-             "minecraft:oak_planks");
-    detail[0] = '\0';
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 7, "demo", 0, 1, 0, 0, &prepared, detail,
-                                 (int)sizeof(detail)) == MP_WORLD_CELL_NOT_AIR,
-           "occupied cell is rejected");
-    EXPECT(g_ww_create_states_calls == 0 &&
-               strcmp(detail, "screen cell is not air") == 0,
-           "validation precedes createBlockData exactly like the C++ order");
-
-    // Fluid backing.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    snprintf(world.cells[1].type, sizeof(world.cells[1].type),
-             "minecraft:water");
-    detail[0] = '\0';
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 7, "demo", 0, 1, 0, 0, &prepared, detail,
-                                 (int)sizeof(detail)) ==
-               MP_WORLD_BACKING_NOT_SOLID,
-           "fluid backing is rejected");
-    EXPECT(strncmp(detail, "backing type=minecraft:water", 28) == 0,
-           "backing rejection reports the offending type");
-
-    // Wrong dimension fails closed before touching the world.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    detail[0] = '\0';
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:the_nether",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 7, "demo", 0, 1, 0, 0, &prepared, detail,
-                                 (int)sizeof(detail)) == MP_WORLD_BAD_ARGUMENT,
-           "dimension mismatch is a bad argument");
-    EXPECT(strcmp(detail, "Player is in a different dimension") == 0,
-           "dimension mismatch reports the read-path detail");
-    EXPECT(!prepared && g_ww_block_live == 0 && g_ww_impl_live == 0,
-           "every failure path leaves zero live fake objects");
-    return 1;
-}
-
-static int test_world_write_inventory_capacity(void)
-{
-    struct fake_ww_server server;
-    struct fake_ww_player player;
-    struct fake_ww_world world;
-    struct fake_ww_inventory inventory;
-    struct fake_ww_map_view map_view;
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    inventory.occupied[0] = 1;
-    inventory.map_id[0] = 5;
-    inventory.occupied[2] = 1;
-    inventory.map_id[2] = -1;
-
-    int available = -1;
-    char detail[192] = {0};
-    EXPECT(mp_world_check_inventory_capacity(&player, 4, &available, detail,
-                                             (int)sizeof(detail)) ==
-                   MP_WORLD_OK &&
-               available == 4,
-           "capacity counts empty slots through getSize+getItem");
-    EXPECT(g_ww_impl_live == 0,
-           "each occupied-slot optional copy is scalar-deleted once");
-
-    detail[0] = '\0';
-    EXPECT(mp_world_check_inventory_capacity(&player, 5, &available, detail,
-                                             (int)sizeof(detail)) ==
-                   MP_WORLD_INVENTORY_FULL &&
-               available == 4,
-           "insufficient empty slots report inventory full");
-    EXPECT(strcmp(detail, "inventory has 4 empty slots; 5 required") == 0,
-           "capacity detail matches the C++ reference text");
-
-    EXPECT(mp_world_check_inventory_capacity(nullptr, 1, &available, nullptr, 0) ==
-                   MP_WORLD_BAD_ARGUMENT &&
-               available == 0,
-           "null player is a bad argument");
-    EXPECT(mp_world_check_inventory_capacity(&player, -1, &available, nullptr,
-                                             0) == MP_WORLD_BAD_ARGUMENT,
-           "negative requirement is a bad argument");
-    EXPECT(g_ww_clear_all_calls == 0 && g_ww_bad_delete_flags == 0,
-           "capacity checking never clears anything");
-    return 1;
-}
-
-static int test_world_write_place_and_remove(void)
-{
-    struct fake_ww_server server;
-    struct fake_ww_player player;
-    struct fake_ww_world world;
-    struct fake_ww_inventory inventory;
-    struct fake_ww_map_view map_view;
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 9;
-    struct screen_pos cell = {0, 64, 0};
-    struct screen_pos backing = {0, 64, 1};
-
-    struct mp_world_prepared_tile *prepared = nullptr;
-    char detail[192] = {0};
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 cell, backing, SCREEN_FACE_NORTH, &map_view,
-                                 9, "demo", 0, 1, 0, 0, &prepared,
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare a placeable tile");
-    EXPECT(mp_world_place_prepared(prepared, detail, (int)sizeof(detail)) ==
-               MP_WORLD_OK,
-           "placement verifies air, applies data and re-verifies the frame");
-    EXPECT(world.set_data_calls == 1 && world.last_physics == 1,
-           "setData is invoked once with apply_physics=true");
-    EXPECT(((struct fake_ww_block_data *)world.last_set_data)->facing == 2,
-           "the placed BlockData is the prepared facing_direction frame");
-    EXPECT(strcmp(world.cells[0].type, "minecraft:frame") == 0,
-           "the cell holds the frame after placement");
-
-    detail[0] = '\0';
-    EXPECT(mp_world_place_prepared(prepared, detail, (int)sizeof(detail)) ==
-               MP_WORLD_CELL_NOT_AIR,
-           "a second placement into the same cell is rejected");
-    EXPECT(strcmp(detail, "screen cell changed before placement") == 0,
-           "occupied-cell detail matches the C++ reference text");
-
-    detail[0] = '\0';
-    EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
-                                   cell, 9, detail, (int)sizeof(detail)) ==
-               MP_WORLD_OK,
-           "managed frame removal restores air");
-    EXPECT(g_ww_create_air_calls == 1 &&
-               strcmp(world.cells[0].type, "minecraft:air") == 0,
-           "removal builds air block data through the states-free overload");
-
-    // Removal of an already-air cell is a no-op success.
-    EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
-                                   cell, 9, nullptr, 0) == MP_WORLD_OK &&
-               g_ww_create_air_calls == 1,
-           "air cell removal succeeds without creating block data");
-
-    // Refuse to remove anything that is not a frame.
-    detail[0] = '\0';
-    EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
-                                   backing, 9, detail,
-                                   (int)sizeof(detail)) ==
-               MP_WORLD_NOT_MANAGED_FRAME,
-           "non-frame block is never removed");
-    EXPECT(strcmp(detail, "refusing to remove a non-frame block") == 0,
-           "non-frame detail matches the C++ reference text");
-    EXPECT(mp_world_remove_managed(&server, &player, "minecraft:overworld",
-                                   (struct screen_pos){9, 9, 9}, 9,
-                                   nullptr, 0) == MP_WORLD_BAD_ARGUMENT,
-           "missing block is a bad argument");
-
-    // setData that does not take effect must be detected.
-    world.set_data_applies = 0;
-    detail[0] = '\0';
-    EXPECT(mp_world_place_prepared(prepared, detail, (int)sizeof(detail)) ==
-               MP_WORLD_FRAME_PLACE_FAILED,
-           "silent setData failure is caught by re-verification");
-    EXPECT(strcmp(detail, "frame block was not present after setData") == 0,
-           "silent failure detail matches the C++ reference text");
-
-    // rollback_placed is the fire-and-forget removal wrapper.
-    world.set_data_applies = 1;
-    snprintf(world.cells[0].type, sizeof(world.cells[0].type),
-             "minecraft:frame");
-    mp_world_rollback_placed(&server, &player, "minecraft:overworld", cell);
-    EXPECT(strcmp(world.cells[0].type, "minecraft:air") == 0,
-           "rollback restores air through remove_managed");
-
-    mp_world_prepared_destroy(prepared);
-    EXPECT(g_ww_block_live == 0 && g_ww_block_data_live == 0 &&
-               g_ww_impl_live == 0 && g_ww_bad_delete_flags == 0,
-           "placement and removal leak no fake runtime objects");
-    return 1;
-}
-
-static int test_world_write_deliver_retract_and_rollback(void)
-{
-    struct fake_ww_server server;
-    struct fake_ww_player player;
-    struct fake_ww_world world;
-    struct fake_ww_inventory inventory;
-    struct fake_ww_map_view map_view;
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-
-    // Full prepare -> place -> deliver -> retract ordering.
-    struct mp_world_prepared_tile *prepared[2] = {0};
-    g_ww_map_view_id = 100;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){0, 64, 0},
-                                 (struct screen_pos){0, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 100, "wall",
-                                 0, 2, 0, 0, &prepared[0],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare tile 0");
-    g_ww_map_view_id = 101;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){1, 64, 0},
-                                 (struct screen_pos){1, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 101, "wall",
-                                 1, 2, 0, 1, &prepared[1],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare tile 1");
-    EXPECT(mp_world_place_prepared(prepared[0], nullptr, 0) == MP_WORLD_OK &&
-               mp_world_place_prepared(prepared[1], nullptr, 0) == MP_WORLD_OK,
-           "place both tiles");
-
-    inventory.occupied[0] = 1; // unrelated junk item in the first slot
-    inventory.map_id[0] = -1;
-    char detail[192] = {0};
-    EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, detail,
-                                          (int)sizeof(detail)) ==
-               MP_WORLD_OK,
-           "deliver both map items");
-    EXPECT(inventory.occupied[1] && inventory.map_id[1] == 100 &&
-               inventory.occupied[2] && inventory.map_id[2] == 101,
-           "delivery fills the first empty slots in order and is verified");
-    EXPECT(g_ww_impl_live == 0,
-           "setItem consumed both impls; verification copies are destroyed");
-    EXPECT(!g_ww_set_item_bad_param,
-           "every setItem optional was engaged with a valid impl");
-
-    mp_world_retract_prepared_maps(&player, prepared, 2);
-    EXPECT(inventory.clear_calls == 2 && !inventory.occupied[1] &&
-               !inventory.occupied[2],
-           "retraction clears exactly the delivered, verified slots");
-    EXPECT(g_ww_clear_all_calls == 0,
-           "retraction uses clear(int), never the whole-inventory clear");
-    mp_world_retract_prepared_maps(&player, prepared, 2);
-    EXPECT(inventory.clear_calls == 2,
-           "a second retraction is a no-op after delivered_slot reset");
-
-    // Re-delivering moved-out tiles must fail without touching slots.
-    EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, nullptr, 0) ==
-               MP_WORLD_MAP_DELIVERY_FAILED,
-           "tiles whose items were already delivered cannot deliver again");
-    mp_world_prepared_destroy(prepared[0]);
-    mp_world_prepared_destroy(prepared[1]);
-
-    // Verification failure at the second tile rolls back the first.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 200;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){0, 64, 0},
-                                 (struct screen_pos){0, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 200, "wall",
-                                 0, 2, 0, 0, &prepared[0],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare rollback tile 0");
-    g_ww_map_view_id = 201;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){1, 64, 0},
-                                 (struct screen_pos){1, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 201, "wall",
-                                 1, 2, 0, 1, &prepared[1],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare rollback tile 1");
-    inventory.drop_set_item_at = 1; // tile 1's setItem silently fails
-    detail[0] = '\0';
-    EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, detail,
-                                          (int)sizeof(detail)) ==
-               MP_WORLD_MAP_DELIVERY_FAILED,
-           "failed post-delivery verification aborts the transaction");
-    EXPECT(strcmp(detail,
-                  "map item verification failed after inventory delivery") == 0,
-           "delivery failure detail matches the C++ reference text");
-    EXPECT(inventory.clear_calls == 1 && inventory.last_cleared == 0 &&
-               !inventory.occupied[0],
-           "automatic retraction clears only the verified delivered slot");
-    mp_world_prepared_destroy(prepared[0]);
-    mp_world_prepared_destroy(prepared[1]);
-
-    // Capacity shrinking between check and delivery is detected.
-    setup_fake_write_world(&server, &player, &world, &inventory, &map_view);
-    g_ww_map_view_id = 300;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){0, 64, 0},
-                                 (struct screen_pos){0, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 300, "wall",
-                                 0, 2, 0, 0, &prepared[0],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare capacity tile 0");
-    g_ww_map_view_id = 301;
-    EXPECT(mp_world_prepare_tile(&server, &player, "minecraft:overworld",
-                                 (struct screen_pos){1, 64, 0},
-                                 (struct screen_pos){1, 64, 1},
-                                 SCREEN_FACE_NORTH, &map_view, 301, "wall",
-                                 1, 2, 0, 1, &prepared[1],
-                                 nullptr, 0) == MP_WORLD_OK,
-           "prepare capacity tile 1");
-    for (int slot = 0; slot < FAKE_WW_INV_SIZE - 1; slot++) {
-        inventory.occupied[slot] = 1;
-        inventory.map_id[slot] = -1;
-    }
-    detail[0] = '\0';
-    EXPECT(mp_world_deliver_prepared_maps(&player, prepared, 2, detail,
-                                          (int)sizeof(detail)) ==
-               MP_WORLD_INVENTORY_FULL,
-           "one remaining slot cannot take two deliveries");
-    EXPECT(strcmp(detail,
-                  "inventory capacity changed during screen creation") == 0,
-           "capacity change detail matches the C++ reference text");
-    EXPECT(g_ww_impl_live == 2,
-           "aborted delivery leaves both prepared tiles owning their items");
-    mp_world_prepared_destroy(prepared[0]);
-    mp_world_prepared_destroy(prepared[1]);
-    EXPECT(g_ww_impl_live == 0 && g_ww_meta_live == 0 &&
-               g_ww_block_data_live == 0 && g_ww_block_live == 0 &&
-               g_ww_bad_delete_flags == 0,
-           "the whole transaction suite leaks no fake runtime objects");
-    return 1;
-}
 #endif
 
 // ================================================================
@@ -6195,19 +5006,11 @@ int main(int argc, char **argv)
 #if defined(ES_PLATFORM_WINDOWS)
     printf("\n[Map ABI]\n");
     RUN_TEST(test_map_abi_dispatch);
-    RUN_TEST(test_msvc_shared_ptr_release_contract);
+    RUN_TEST(test_shared_handle_release_contract);
     RUN_TEST(test_renderer_registration_callback_and_lifetime);
     RUN_TEST(test_render_multi_tile_dirty_tracking);
-    printf("\n[Pure-C World Read ABI]\n");
-    RUN_TEST(test_world_read_abi_snapshot_and_failure_safety);
-    RUN_TEST(test_world_read_abi_block_lifetime_and_policy);
-    RUN_TEST(test_world_read_abi_validation_inspection_and_map_lookup);
     printf("\n[Pure-C World Write ABI]\n");
-    RUN_TEST(test_world_write_prepare_builds_frame_and_map_item);
-    RUN_TEST(test_world_write_prepare_failure_paths);
-    RUN_TEST(test_world_write_inventory_capacity);
-    RUN_TEST(test_world_write_place_and_remove);
-    RUN_TEST(test_world_write_deliver_retract_and_rollback);
+    RUN_TEST(test_world_write_item_frame_roundtrip);
 #endif
 
     remove_fixtures();

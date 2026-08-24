@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "mediaplayer/endstone_api.h"
+#include "abi_helpers.h"
 
 void *g_plugin = nullptr;
 
@@ -21,17 +22,23 @@ static void *fake_get_online_players(void *server, void *out)
 #endif
 {
     (void)server;
-    void **allocation = malloc(sizeof(g_online_player_values));
-    if (allocation)
-        memcpy(allocation, g_online_player_values,
-               sizeof(g_online_player_values));
-    void **storage = out;
-    storage[0] = allocation;
-    storage[1] = allocation
-                     ? allocation + sizeof(g_online_player_values) /
-                                        sizeof(g_online_player_values[0])
-                     : nullptr;
-    storage[2] = storage[1];
+    size_t count = sizeof(g_online_player_values) /
+                   sizeof(g_online_player_values[0]);
+    size_t bytes = count * ES_VECTOR_NOTNULL_PLAYER_ELEMENT_SIZE;
+    unsigned char *allocation = calloc(1, bytes);
+    if (allocation) {
+        for (size_t index = 0; index < count; index++) {
+            es_shared_init(
+                allocation + index * ES_VECTOR_NOTNULL_PLAYER_ELEMENT_SIZE +
+                    ES_NOTNULL_PLAYER_OFF_SHARED_PTR,
+                g_online_player_values[index], nullptr);
+        }
+    }
+    es_store_pointer(out, ES_VECTOR_OFF_BEGIN, allocation);
+    es_store_pointer(out, ES_VECTOR_OFF_END,
+                     allocation ? allocation + bytes : nullptr);
+    es_store_pointer(out, ES_VECTOR_OFF_CAPACITY,
+                     allocation ? allocation + bytes : nullptr);
 #if !ES_PLATFORM_LINUX
     return out;
 #endif

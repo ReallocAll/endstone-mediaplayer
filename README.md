@@ -79,7 +79,7 @@ Screens use a fixed public viewer model. Any online player—OP or not—with a 
 
 When a video has an exactly matching `.nbs` base name, the plugin plays it as the screen soundtrack. The video is the master clock: pausing or stopping affects both, every video loop restarts the NBS, and music remaining after the video ends is stopped. A missing or invalid matching NBS does not prevent silent video playback.
 
-To create a screen, stand in the air immediately in front of a rectangular solid backing wall no larger than 7×4 and run `/mpv create <name>`. The player's feet-level air cell defines the bottom screen row; backing and floor blocks below that Y are ignored. Every actual display cell must be air. The plugin discovers the wall from that Y upward, validates every tile, places empty item frames, and gives the creator labeled maps. Install the maps manually from left to right and top to bottom using their row/column labels.
+To create a screen, stand in the air immediately in front of a rectangular solid backing wall no larger than 7×4 and run `/mpv create <name>`. The player's feet-level air cell defines the bottom screen row; backing and floor blocks below that Y are ignored. Every actual display cell must be air. The plugin discovers the wall from that Y upward, validates every tile, places item frames, and inserts the matching filled maps automatically through Endstone's ItemFrame state API.
 
 An API-created logical screen can be materialized in place by an OP player with
 `/mpv materialize <name>`. The command requires the discovered backing to have

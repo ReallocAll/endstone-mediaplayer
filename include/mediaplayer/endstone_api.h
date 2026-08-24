@@ -7,9 +7,15 @@
 #define ENDSTONE_MEDIAPLAYER_PATH_MAX 4096
 
 FILE *fopen_utf8(const char *path, const char *mode);
-// Copies borrowed Player pointers from Server::getOnlinePlayers().
-// Returns the copied count, or -1 when the server ABI result is invalid.
+// Copies borrowed Player pointers from Server::getOnlinePlayers() and releases
+// every temporary vector handle before returning.
 int server_get_online_players(void *server, void **players, int capacity);
+void *endstone_expected_image_base(void);
+bool endstone_expected_image_matches(void *base);
+bool server_find_player_handle(void *server, void *player,
+                               struct es_shared_handle *out);
+void *server_player_from_sender(void *server,
+                                const struct es_shared_handle *sender);
 void sender_send_message(void *sender, const char *message);
 void player_get_location(void *player, struct es_location *location);
 void player_play_sound(void *player, const char *sound,

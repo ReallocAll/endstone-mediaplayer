@@ -26,11 +26,8 @@ static void map_log(const char *fmt, ...)
 
 #if defined(ES_PLATFORM_WINDOWS) || defined(ES_PLATFORM_LINUX)
 
-// MapRenderer has a 16-byte base on both supported ABIs.
 struct tile_renderer {
-    void **vtable;
-    bool is_contextual;
-    unsigned char base_padding[7];
+    _Alignas(void *) unsigned char base[ES_MAPRENDERER_SIZE];
     int tile_col;
     int tile_row;
     char screen_name[SCREEN_NAME_MAX];
@@ -51,29 +48,15 @@ struct tile_renderer {
     uint32_t last_last_pixel;
 };
 
-static_assert(offsetof(struct tile_renderer, is_contextual) ==
-                  ES_MAPRENDERER_OFF_IS_CONTEXTUAL,
-              "MapRenderer contextual flag offset mismatch");
 static_assert(offsetof(struct tile_renderer, tile_col) == ES_MAPRENDERER_SIZE,
               "MapRenderer base size mismatch");
 
 struct ref_count_block {
-    void **vtable;
-#if defined(ES_PLATFORM_WINDOWS)
-    int uses;
-    int weaks;
-#else
-    long uses;
-    long weaks;
-#endif
+    _Alignas(void *) unsigned char bytes[ES_REFCOUNT_SIZE];
 };
 
 static_assert(sizeof(struct ref_count_block) == ES_REFCOUNT_SIZE,
               "shared_ptr control block size mismatch");
-static_assert(offsetof(struct ref_count_block, uses) == ES_REFCOUNT_OFF_USES,
-              "shared_ptr strong count offset mismatch");
-static_assert(offsetof(struct ref_count_block, weaks) == ES_REFCOUNT_OFF_WEAKS,
-              "shared_ptr weak count offset mismatch");
 
 struct renderer_alloc {
     struct tile_renderer renderer;
@@ -94,11 +77,17 @@ static void renderer_dtor(void *self, unsigned int flags)
     renderer_destroy(self);
 }
 
-static void *g_renderer_vtable[] = {
-    (void *)renderer_dtor,
-    (void *)renderer_is_endstone,
-    (void *)renderer_initialize,
-    (void *)renderer_render,
+static void *g_renderer_vtable[
+    ES_MAPRENDERER_VTABLE_PREFIX_SLOTS +
+    ES_MAPRENDERER_VTABLE_SLOT_COUNT] = {
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_DTOR] =
+        (void *)renderer_dtor,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_IS_ENDSTONE] =
+        (void *)renderer_is_endstone,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_INIT] =
+        (void *)renderer_initialize,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_RENDER] =
+        (void *)renderer_render,
 };
 #else
 static void renderer_complete_dtor(void *self)
@@ -111,14 +100,21 @@ static void renderer_deleting_dtor(void *self)
     renderer_destroy(self);
 }
 
-static void *g_renderer_vtable[] = {
-    nullptr,
-    nullptr,
-    (void *)renderer_complete_dtor,
-    (void *)renderer_deleting_dtor,
-    (void *)renderer_is_endstone,
-    (void *)renderer_initialize,
-    (void *)renderer_render,
+static void *g_renderer_vtable[
+    ES_MAPRENDERER_VTABLE_PREFIX_SLOTS +
+    ES_MAPRENDERER_VTABLE_SLOT_COUNT] = {
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS +
+        ES_MAPRENDERER_SLOT_DTOR_COMPLETE] =
+            (void *)renderer_complete_dtor,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS +
+        ES_MAPRENDERER_SLOT_DTOR_DELETING] =
+            (void *)renderer_deleting_dtor,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_IS_ENDSTONE] =
+        (void *)renderer_is_endstone,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_INIT] =
+        (void *)renderer_initialize,
+    [ES_MAPRENDERER_VTABLE_PREFIX_SLOTS + ES_MAPRENDERER_SLOT_RENDER] =
+        (void *)renderer_render,
 };
 #endif
 
@@ -190,7 +186,9 @@ static void renderer_render(void *self, void *map_view, void *canvas,
     renderer->render_count++;
     renderer->last_map_view = map_view;
     renderer->last_canvas = canvas;
-    renderer->last_player = player;
+    renderer->last_player = player
+        ? es_shared_object((char *)player + ES_NOTNULL_PLAYER_OFF_SHARED_PTR)
+        : nullptr;
     renderer->last_canvas_valid = false;
     renderer->last_write_verified = false;
     renderer->last_canvas_pixels = 0;
@@ -262,9 +260,12 @@ static void control_delete_this(void *self)
 }
 
 #if defined(ES_PLATFORM_WINDOWS)
-static void *g_control_vtable[] = {
-    (void *)control_destroy_resource,
-    (void *)control_delete_this,
+static void *g_control_vtable[
+    ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_VTABLE_SLOT_COUNT] = {
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DESTROY_RESOURCE] =
+        (void *)control_destroy_resource,
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DELETE_THIS] =
+        (void *)control_delete_this,
 };
 #else
 static void control_complete_dtor(void *self)
@@ -284,14 +285,18 @@ static void *control_get_deleter(void *self, const void *type_info)
     return nullptr;
 }
 
-static void *g_control_vtable[] = {
-    nullptr,
-    nullptr,
-    (void *)control_complete_dtor,
-    (void *)control_deleting_dtor,
-    (void *)control_destroy_resource,
-    (void *)control_get_deleter,
-    (void *)control_delete_this,
+static void *g_control_vtable[
+    ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_VTABLE_SLOT_COUNT] = {
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DTOR_COMPLETE] =
+        (void *)control_complete_dtor,
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DTOR_DELETING] =
+        (void *)control_deleting_dtor,
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_GET_DELETER] =
+        (void *)control_get_deleter,
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DESTROY_RESOURCE] =
+        (void *)control_destroy_resource,
+    [ES_REFCOUNT_VTABLE_PREFIX_SLOTS + ES_REFCOUNT_SLOT_DELETE_THIS] =
+        (void *)control_delete_this,
 };
 #endif
 
@@ -304,51 +309,32 @@ static struct renderer_alloc *renderer_create(int col, int row,
     if (!allocation) {
         return nullptr;
     }
-#if defined(ES_PLATFORM_WINDOWS)
-    allocation->renderer.vtable = g_renderer_vtable;
-#else
-    allocation->renderer.vtable = &g_renderer_vtable[2];
-#endif
-    allocation->renderer.is_contextual = false;
+    es_store_pointer(allocation->renderer.base, 0,
+        g_renderer_vtable + ES_MAPRENDERER_VTABLE_PREFIX_SLOTS);
+    allocation->renderer.base[ES_MAPRENDERER_OFF_IS_CONTEXTUAL] = false;
     allocation->renderer.tile_col = col;
     allocation->renderer.tile_row = row;
     snprintf(allocation->renderer.screen_name,
              sizeof(allocation->renderer.screen_name), "%s", screen_name);
     allocation->renderer.pixel_width = pixel_width;
     allocation->renderer.pixel_height = pixel_height;
-#if defined(ES_PLATFORM_WINDOWS)
-    allocation->control.vtable = g_control_vtable;
-
-    // Retain one owner after addRenderer consumes its parameter.
-    allocation->control.uses = 2;
-    allocation->control.weaks = 1;
-#else
-    allocation->control.vtable = &g_control_vtable[2];
-    allocation->control.uses = 1;
-    allocation->control.weaks = 0;
-#endif
+    es_store_pointer(allocation->control.bytes, 0,
+        g_control_vtable + ES_REFCOUNT_VTABLE_PREFIX_SLOTS);
+    // Pre-account for the caller's retained owner and the by-value parameter.
+    es_counter_store(allocation->control.bytes + ES_REFCOUNT_OFF_USES,
+                     ES_REFCOUNT_ONE_OWNER_VALUE + 1);
+    es_counter_store(allocation->control.bytes + ES_REFCOUNT_OFF_WEAKS,
+                     ES_REFCOUNT_IMPLICIT_WEAK_VALUE);
     return allocation;
 }
 
-#if defined(ES_PLATFORM_WINDOWS)
-static struct es_msvc_shared_ptr renderer_shared(struct renderer_alloc *allocation)
+static struct es_shared_handle renderer_shared(
+    struct renderer_alloc *allocation)
 {
-    struct es_msvc_shared_ptr shared = {
-        .ptr = &allocation->renderer,
-        .control = &allocation->control,
-    };
+    struct es_shared_handle shared;
+    es_shared_init(&shared, &allocation->renderer, &allocation->control);
     return shared;
 }
-#else
-static struct es_libcxx_shared_ptr renderer_shared(struct renderer_alloc *allocation)
-{
-    struct es_libcxx_shared_ptr shared = {
-        .ptr = &allocation->renderer,
-        .control = &allocation->control,
-    };
-    return shared;
-}
-#endif
 
 // tile_dirty selects which tiles to transmit; nullptr sends every tile,
 // which is what a new viewer, a test pattern or a forced resend needs.
@@ -423,13 +409,14 @@ enum map_render_error map_render_init_screen(struct map_render_ctx *ctx,
             return MAP_RENDER_ERR_INIT;
         }
 
-#if defined(ES_PLATFORM_WINDOWS)
-        struct es_msvc_shared_ptr parameter = renderer_shared(allocation);
-#else
-        struct es_libcxx_shared_ptr parameter = renderer_shared(allocation);
-#endif
+        struct es_shared_handle parameter = renderer_shared(allocation);
         es_map_view_add_renderer(map_view, &parameter);
-        // parameter has been destroyed by addRenderer; do not release it here.
+        if (ES_C_ABI_NOTNULL_CALLEE_DESTROYS) {
+            memset(&parameter, 0, sizeof(parameter));
+        }
+        else {
+            es_shared_release(&parameter);
+        }
         es_map_view_set_locked(map_view, true);
 
         screen->tiles[i].renderer = allocation;
@@ -495,19 +482,11 @@ void map_render_destroy_screen(struct map_render_ctx *ctx,
         if (allocation) {
             // Prevent callbacks from observing a session buffer after stop.
             allocation->renderer.tile_pixels = nullptr;
-#if defined(ES_PLATFORM_WINDOWS)
-            struct es_msvc_shared_ptr owner = renderer_shared(allocation);
-#else
-            struct es_libcxx_shared_ptr owner = renderer_shared(allocation);
-#endif
+            struct es_shared_handle owner = renderer_shared(allocation);
             if (screen->tiles[i].map_view) {
                 es_map_view_remove_renderer(screen->tiles[i].map_view, &owner);
             }
-#if defined(ES_PLATFORM_WINDOWS)
-            es_msvc_shared_ptr_release(&owner);
-#else
-            es_libcxx_shared_ptr_release(&owner);
-#endif
+            es_shared_release(&owner);
         }
 #endif
         screen->tiles[i].renderer = nullptr;
@@ -792,12 +771,11 @@ bool map_render_get_stats(const struct screen_entry *screen, int tile,
     stats->last_map_view = allocation->renderer.last_map_view;
     stats->last_player = allocation->renderer.last_player;
     stats->renderer = &allocation->renderer;
-    stats->renderer_vptr = allocation->renderer.vtable;
-#if defined(ES_PLATFORM_WINDOWS)
-    stats->strong_references = allocation->control.uses;
-#else
-    stats->strong_references = allocation->control.uses + 1;
-#endif
+    stats->renderer_vptr = es_pointer_at(allocation->renderer.base, 0);
+    int64_t stored = es_counter_load(
+        allocation->control.bytes + ES_REFCOUNT_OFF_USES);
+    stats->strong_references =
+        (int)(stored - ES_REFCOUNT_ONE_OWNER_VALUE + 1);
     stats->last_canvas_valid = allocation->renderer.last_canvas_valid;
     stats->last_write_verified = allocation->renderer.last_write_verified;
     stats->last_canvas_pixels = allocation->renderer.last_canvas_pixels;

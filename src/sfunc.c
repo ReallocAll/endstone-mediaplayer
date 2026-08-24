@@ -99,6 +99,16 @@ void sfunc_build(void *buffer, const struct func_impl *descriptor)
     *(void **)((char *)buffer + 32) = buffer;
 }
 
+void sfunc_after_by_value(void *buffer)
+{
+    if (!buffer) return;
+    if (!ES_C_ABI_FUNCTION_CALLEE_DESTROYS) {
+        void **vtable = *(void ***)buffer;
+        if (vtable) ((void (*)(void *))vtable[4])(buffer);
+    }
+    memset(buffer, 0, ES_STD_FUNCTION_SIZE);
+}
+
 #else
 
 static void *sfunc_copy(void *self, void *dst)
@@ -148,6 +158,11 @@ void sfunc_build(void *buffer, const struct func_impl *descriptor)
     memcpy(buffer, descriptor, 3 * sizeof(void *));
     *(void **)((char *)buffer + 0x30) = buffer;
     *(void **)((char *)buffer + 0x38) = buffer;
+}
+
+void sfunc_after_by_value(void *buffer)
+{
+    if (buffer) memset(buffer, 0, ES_STD_FUNCTION_SIZE);
 }
 
 #endif

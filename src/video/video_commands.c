@@ -902,7 +902,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
     if (!mp_world_managed_frames_supported()) {
         send_err(sender,
                  "Detected %dx%d backing from (%d,%d,%d), facing %s; "
-                 "Endstone 0.11 item-frame map insertion is not implemented yet.",
+                 "the exact Endstone 0.12 ItemFrame ABI is unavailable.",
                  geom.width, geom.height,
                  seed_backing.x, seed_backing.y, seed_backing.z,
                  screen_facing_name(geom.facing));
@@ -913,8 +913,8 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
     enum mp_world_result capacity = mp_world_check_inventory_capacity(
         player, tile_count, &available_slots, detail, (int)sizeof(detail));
     if (capacity != MP_WORLD_OK) {
-        send_err(sender, "Clear at least %d inventory slots before creation: %s.",
-                 tile_count, detail[0] ? detail : mp_world_result_name(capacity));
+        send_err(sender, "Automatic ItemFrame preparation failed: %s.",
+                 detail[0] ? detail : mp_world_result_name(capacity));
         return;
     }
 
@@ -1002,7 +1002,7 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
             mp_world_prepared_destroy(prepared[i]);
         map_render_destroy_screen(&ctx->render, &draft);
         screen_entry_cleanup_tiles(&draft);
-        send_err(sender, "Map delivery failed; frame placement was rolled back: %s.",
+        send_err(sender, "Automatic map insertion failed; frame placement was rolled back: %s.",
                  detail[0] ? detail : mp_world_result_name(delivered));
         return;
     }
@@ -1059,14 +1059,9 @@ static void cmd_screen_create(struct video_ctx *ctx, void *sender, void *player,
 
     char buffer[192];
     snprintf(buffer, sizeof(buffer), MC_GREEN "[MediaPlayer] " MC_GRAY
-             "Screen '%s' created (%dx%d, facing %s); %d empty frames placed.",
+             "Screen '%s' created (%dx%d, facing %s); %d map frames filled automatically.",
              name, geom.width, geom.height,
              screen_facing_name(geom.facing), tile_count);
-    sender_send_message(sender, buffer);
-    snprintf(buffer, sizeof(buffer), MC_YELLOW "[MediaPlayer] " MC_GRAY
-             "%d labeled maps were put in your inventory. Install them "
-             "left-to-right, top-to-bottom by their row/col labels.",
-             tile_count);
     sender_send_message(sender, buffer);
 }
 
@@ -1190,7 +1185,7 @@ static void cmd_screen_materialize(struct video_ctx *ctx, void *sender,
     enum mp_world_result capacity = mp_world_check_inventory_capacity(
         player, tile_count, &available_slots, detail, (int)sizeof(detail));
     if (capacity != MP_WORLD_OK) {
-        send_err(sender, "Backing/world inventory validation failed: %s.",
+        send_err(sender, "Backing/world ItemFrame validation failed: %s.",
                  detail[0] ? detail : mp_world_result_name(capacity));
         return;
     }
@@ -1256,7 +1251,7 @@ static void cmd_screen_materialize(struct video_ctx *ctx, void *sender,
         materialize_discard_stage(ctx, &draft, prepared, prepared_count,
                                   player, placed_count, 1);
         send_err(sender,
-                 "Backing/world map delivery failed; frame placement was "
+                 "Backing/world automatic map insertion failed; frame placement was "
                  "rolled back: %s.",
                  detail[0] ? detail : mp_world_result_name(delivered));
         return;
@@ -1294,11 +1289,6 @@ static void cmd_screen_materialize(struct video_ctx *ctx, void *sender,
              "Logical screen '%s' materialized (%dx%d, facing %s).",
              screen->name, geom.width, geom.height,
              screen_facing_name(geom.facing));
-    sender_send_message(sender, buffer);
-    snprintf(buffer, sizeof(buffer), MC_YELLOW "[MediaPlayer] " MC_GRAY
-             "%d labeled maps were put in your inventory. Install them "
-             "left-to-right, top-to-bottom by their row/col labels.",
-             tile_count);
     sender_send_message(sender, buffer);
 }
 
@@ -1346,6 +1336,7 @@ static void cmd_screen_delete(struct video_ctx *ctx, void *sender, void *player,
                 screen->tiles[tile].map_id, &state,
                 detail, (int)sizeof(detail));
             if (state.cell_is_air) continue;
+            if (inspected == MP_WORLD_OK) continue;
             if (inspected == MP_WORLD_MAP_ID_UNVERIFIABLE &&
                 state.frame_present) {
                 continue;
@@ -1913,13 +1904,9 @@ static void debug_world_abi_dump(struct video_ctx *ctx, void *sender,
     char buffer[512];
     snprintf(buffer, sizeof(buffer), MC_AQUA "World ABI slots: " MC_GRAY
              "player.getLocation=%d player.getDimension=%d "
-             "dimension.getName=%d dimension.getBlockAt=%d",
-#if defined(ES_PLATFORM_WINDOWS)
+             "dimension.getId=%d dimension.getBlockAt=%d",
              ES_PLAYER_SLOT_GET_LOCATION, ES_PLAYER_SLOT_GET_DIMENSION,
-             ES_DIMENSION_SLOT_GET_NAME, ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ);
-#else
-             -1, -1, -1, -1);
-#endif
+             ES_DIMENSION_SLOT_GET_ID, ES_DIMENSION_SLOT_GET_BLOCK_AT_XYZ);
     sender_send_message(sender, buffer);
 
     struct mp_player_snapshot snapshot = {0};
@@ -1936,11 +1923,11 @@ static void debug_world_abi_dump(struct video_ctx *ctx, void *sender,
     sender_send_message(sender, buffer);
     snprintf(buffer, sizeof(buffer), MC_GRAY
              " dimension=%s player=%p vptr=%p location_target=%p "
-             "dimension_target=%p name_target=%p dimension_ptr=%p",
+             "dimension_target=%p id_target=%p dimension_ptr=%p",
              snapshot.dimension_id, snapshot_trace.player,
              snapshot_trace.player_vptr, snapshot_trace.get_location_target,
              snapshot_trace.get_dimension_target,
-             snapshot_trace.get_name_target, snapshot_trace.dimension);
+             snapshot_trace.get_id_target, snapshot_trace.dimension);
     sender_send_message(sender, buffer);
     if (!snapshot_ok) {
         snprintf(buffer, sizeof(buffer), MC_RED " snapshot failed: %s",
@@ -1976,12 +1963,12 @@ static void debug_world_abi_dump(struct video_ctx *ctx, void *sender,
         sender_send_message(sender, buffer);
         snprintf(buffer, sizeof(buffer), MC_GRAY
                  " dimension=%p vptr=%p getBlock=%p block=%p bv=%p "
-                 "getType=%p source=%p sv=%p delete=%p destroyed=%u%s%s",
+                 "getType=%p blockType=%p typeVptr=%p getId=%p released=%u%s%s",
                  trace.dimension, trace.dimension_vptr,
                  trace.get_block_target, trace.block_address,
                  trace.block_vptr, trace.get_type_target,
-                 trace.block_source, trace.block_source_vptr,
-                 trace.block_delete_target, trace.block_destroy_count,
+                 trace.block_type, trace.block_type_vptr,
+                 trace.block_type_get_id_target, trace.handle_release_count,
                  detail[0] ? " err=" : "", detail[0] ? detail : "");
         sender_send_message(sender, buffer);
     }

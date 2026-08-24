@@ -1,6 +1,7 @@
 #ifndef ENDSTONE_MEDIAPLAYER_BEDROCK_WORLD_READ_ABI_H
 #define ENDSTONE_MEDIAPLAYER_BEDROCK_WORLD_READ_ABI_H
 
+#include "endstone_abi.h"
 #include "mediaplayer/bedrock/world_bridge.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,15 +14,15 @@ struct mp_world_c_trace {
     void *get_dimension_target;
     void *dimension;
     void *dimension_vptr;
-    void *get_name_target;
+    void *get_id_target;
     void *get_block_target;
     void *block_address;
     void *block_vptr;
     void *get_type_target;
-    void *block_source;
-    void *block_source_vptr;
-    void *block_delete_target;
-    unsigned int block_destroy_count;
+    void *block_type;
+    void *block_type_vptr;
+    void *block_type_get_id_target;
+    unsigned int handle_release_count;
 };
 
 bool mp_world_c_supported(void);
@@ -39,10 +40,11 @@ enum mp_world_result mp_world_c_debug_probe_block(
 bool mp_world_c_type_is_air(const char *block_type);
 bool mp_world_c_type_is_support_candidate(const char *block_type);
 
-// Resolves the borrowed server-owned Dimension for a verified player.
+// Resolves an owned Dimension handle for a verified player. The caller must
+// release it with es_shared_release().
 bool mp_world_c_player_world(void *endstone_player,
                              const char *expected_dimension,
-                             void **dimension_out,
+                             struct es_shared_handle *dimension_out,
                              char *detail, int detail_size);
 
 #endif

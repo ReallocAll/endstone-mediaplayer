@@ -223,6 +223,7 @@ add_test(NAME nbs_parser COMMAND test_nbs_parser)
 
 # Video screen system tests
 add_executable(test_video tests/test_video.c
+    tests/test_endstone_image_stub.c
     src/api_provider.c
     src/screen/screen_geometry.c
     src/screen/screen_registry.c
@@ -259,6 +260,7 @@ target_include_directories(test_video PRIVATE
     third_party/nbsparser
     third_party/stb)
 target_compile_definitions(test_video PRIVATE
+    MP_TESTING=1
     _CRT_SECURE_NO_WARNINGS
     ${MP_MINIZ_DEFINES})
 if(ENABLE_MPV_DEBUG_COMMANDS)
